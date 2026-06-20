@@ -1,0 +1,1162 @@
+//! PulseChain Reth node integration.
+//!
+//! This crate adapts Reth's Ethereum node stack for PulseChain by supplying
+//! chain parsing, PulseChain chain specs, EVM environment overrides, and the
+//! PrimordialPulse block executor state mutation.
+
+use std::sync::Arc;
+
+use pulsechain_chainspec::{
+    PULSECHAIN_MAINNET, PULSECHAIN_TESTNET_V4, PulseChainSpec, TreasuryCredit,
+    pulsechain_spec_for_chain_id,
+};
+use pulsechain_consensus::PulseConsensusError;
+use pulsechain_evm::{
+    deposit_contract::{
+        DEPOSIT_CONTRACT_STORAGE, ETHEREUM_DEPOSIT_CONTRACT, NIL_CONTRACT_BYTECODE,
+        PULSE_DEPOSIT_CONTRACT_BYTECODE, PULSECHAIN_DEPOSIT_CONTRACT, go_pulse_hex_to_hash,
+    },
+    sacrifice::allocation_for_chain_id,
+};
+use pulsechain_hardforks::{
+    PRIMORDIAL_PULSE_BLOCK, PULSECHAIN_MAINNET_CHAIN_ID, PULSECHAIN_TESTNET_V4_CHAIN_ID,
+    PULSECHAIN_TESTNET_V4_PRIMORDIAL_PULSE_BLOCK, PULSECHAIN_TTD_OFFSET, transaction_chain_id_at,
+};
+use reth_cli::chainspec::ChainSpecParser;
+use reth_ethereum::{
+    Block, EthPrimitives, Receipt, TransactionSigned,
+    chainspec::{
+        Chain, ChainSpec, EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition, MAINNET,
+    },
+    cli::chainspec::EthereumChainSpecParser,
+    consensus::{
+        Consensus, ConsensusError, EthBeaconConsensus, FullConsensus, HeaderValidator,
+        validate_block_post_execution,
+        validation::{
+            validate_against_parent_4844, validate_against_parent_eip1559_base_fee,
+            validate_against_parent_gas_limit, validate_against_parent_hash_number,
+            validate_against_parent_timestamp, validate_block_pre_execution,
+            validate_body_against_header, validate_header_base_fee, validate_header_extra_data,
+            validate_header_gas,
+        },
+    },
+    evm::{
+        EthBlockAssembler, EthEvm, EthEvmConfig, RethReceiptBuilder,
+        primitives::{
+            Database, EthEvmFactory, Evm, EvmEnv, EvmEnvFor, ExecutionCtxFor, InspectorFor,
+            NextBlockEnvAttributes, OnStateHook,
+            block::{BlockExecutor, BlockExecutorFactory, BlockExecutorFor, ExecutableTx},
+            eth::{EthBlockExecutionCtx, EthBlockExecutor},
+            execute::{BlockExecutionError, InternalBlockExecutionError},
+            precompiles::PrecompilesMap,
+        },
+        revm::{
+            Database as _, DatabaseCommit,
+            context::{TxEnv, result::ResultAndState},
+            db::State,
+            primitives::{Address, U256, hardfork::SpecId},
+            state::{Account, Bytecode, EvmState, EvmStorage, EvmStorageSlot},
+        },
+    },
+    node::{
+        api::{ConfigureEngineEvm, ConfigureEvm, ExecutableTxIterator, FullNodeTypes, NodeTypes},
+        builder::{
+            BuilderContext,
+            components::{ConsensusBuilder, ExecutorBuilder},
+        },
+    },
+    primitives::{
+        Block as BlockTrait, BlockHeader, Header, NodePrimitives, RecoveredBlock, SealedBlock,
+        SealedHeader,
+    },
+    provider::BlockExecutionResult,
+    rpc::types::engine::ExecutionData,
+};
+use thiserror::Error;
+
+const ALLOWED_FUTURE_BLOCK_TIME_SECONDS: u64 = 15;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    FastMvpTrustedCheckpoint,
+    FullValidation,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PulseNodeError {
+    #[error(transparent)]
+    Consensus(#[from] PulseConsensusError),
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PulseChainNode;
+
+impl PulseChainNode {
+    pub fn assert_supported(mode: SyncMode) -> Result<(), PulseNodeError> {
+        match mode {
+            SyncMode::FastMvpTrustedCheckpoint => Ok(()),
+            SyncMode::FullValidation => {
+                pulsechain_consensus::assert_full_validation_ready().map_err(Into::into)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PulseChainSpecParser;
+
+impl ChainSpecParser for PulseChainSpecParser {
+    type ChainSpec = ChainSpec;
+
+    const SUPPORTED_CHAINS: &'static [&'static str] =
+        &["pulsechain", "pulsechain-testnet-v4", "mainnet", "dev"];
+
+    fn parse(chain: &str) -> eyre::Result<Arc<ChainSpec>> {
+        match chain {
+            "pulsechain" => Ok(pulsechain_reth_chainspec()),
+            "pulsechain-testnet-v4" | "pulsechain-devnet" => {
+                Ok(pulsechain_testnet_v4_reth_chainspec())
+            }
+            other => EthereumChainSpecParser::parse(other),
+        }
+    }
+}
+
+pub fn pulsechain_reth_chainspec() -> Arc<ChainSpec> {
+    pulsechain_reth_chainspec_from(PULSECHAIN_MAINNET)
+}
+
+pub fn pulsechain_testnet_v4_reth_chainspec() -> Arc<ChainSpec> {
+    pulsechain_reth_chainspec_from(PULSECHAIN_TESTNET_V4)
+}
+
+fn pulsechain_reth_chainspec_from(pulse_spec: PulseChainSpec) -> Arc<ChainSpec> {
+    let mut spec = (**MAINNET).clone();
+    spec.chain = Chain::from(pulse_spec.chain_id);
+    spec.genesis.config.chain_id = pulse_spec.chain_id;
+    spec.genesis.config.shanghai_time = Some(pulse_spec.shanghai_timestamp);
+    spec.genesis.config.terminal_total_difficulty = Some(pulse_spec.terminal_total_difficulty);
+    spec.paris_block_and_final_difficulty = Some((
+        pulse_spec.primordial_pulse_block,
+        pulse_spec.terminal_total_difficulty,
+    ));
+    spec.hardforks.insert(
+        EthereumHardfork::Paris,
+        ForkCondition::TTD {
+            activation_block_number: pulse_spec.primordial_pulse_block,
+            total_difficulty: pulse_spec.terminal_total_difficulty,
+            fork_block: Some(pulse_spec.primordial_pulse_block),
+        },
+    );
+    spec.hardforks.insert(
+        EthereumHardfork::Shanghai,
+        ForkCondition::Timestamp(pulse_spec.shanghai_timestamp),
+    );
+    Arc::new(spec)
+}
+
+/// PulseChain consensus wrapper over Reth's Ethereum beacon consensus.
+///
+/// go-pulse keeps Ethereum beacon validation for normal post-Paris blocks, but
+/// allows the PrimordialPulse block itself to cross from a zero-difficulty POS
+/// parent back into a POW-style header with the Pulse TTD offset difficulty.
+#[derive(Debug, Clone)]
+pub struct PulseBeaconConsensus<ChainSpec> {
+    inner: EthBeaconConsensus<ChainSpec>,
+}
+
+impl<ChainSpec> PulseBeaconConsensus<ChainSpec>
+where
+    ChainSpec: EthChainSpec + EthereumHardforks,
+{
+    pub fn new(chain_spec: Arc<ChainSpec>) -> Self {
+        Self {
+            inner: EthBeaconConsensus::new(chain_spec),
+        }
+    }
+
+    pub const fn inner(&self) -> &EthBeaconConsensus<ChainSpec> {
+        &self.inner
+    }
+}
+
+impl<ChainSpec, N> FullConsensus<N> for PulseBeaconConsensus<ChainSpec>
+where
+    ChainSpec:
+        Send + Sync + EthChainSpec<Header = N::BlockHeader> + EthereumHardforks + std::fmt::Debug,
+    N: NodePrimitives,
+{
+    fn validate_block_post_execution(
+        &self,
+        block: &RecoveredBlock<N::Block>,
+        result: &BlockExecutionResult<N::Receipt>,
+    ) -> Result<(), ConsensusError> {
+        validate_block_post_execution(
+            block,
+            self.inner.chain_spec(),
+            &result.receipts,
+            &result.requests,
+        )
+    }
+}
+
+impl<B, ChainSpec> Consensus<B> for PulseBeaconConsensus<ChainSpec>
+where
+    B: BlockTrait,
+    ChainSpec: EthChainSpec<Header = B::Header> + EthereumHardforks + std::fmt::Debug + Send + Sync,
+{
+    type Error = ConsensusError;
+
+    fn validate_body_against_header(
+        &self,
+        body: &B::Body,
+        header: &SealedHeader<B::Header>,
+    ) -> Result<(), Self::Error> {
+        validate_body_against_header(body, header.header())
+    }
+
+    fn validate_block_pre_execution(&self, block: &SealedBlock<B>) -> Result<(), Self::Error> {
+        validate_block_pre_execution(block, self.inner.chain_spec())
+    }
+}
+
+impl<H, ChainSpec> HeaderValidator<H> for PulseBeaconConsensus<ChainSpec>
+where
+    H: BlockHeader,
+    ChainSpec: EthChainSpec<Header = H> + EthereumHardforks + std::fmt::Debug + Send + Sync,
+{
+    fn validate_header(&self, header: &SealedHeader<H>) -> Result<(), ConsensusError> {
+        if self.is_primordial_pulse_pow_header(header.header()) {
+            return self.validate_primordial_pulse_pow_header(header.header());
+        }
+
+        self.inner.validate_header(header)
+    }
+
+    fn validate_header_against_parent(
+        &self,
+        header: &SealedHeader<H>,
+        parent: &SealedHeader<H>,
+    ) -> Result<(), ConsensusError> {
+        validate_against_parent_hash_number(header.header(), parent)?;
+
+        if parent.difficulty().is_zero()
+            && !header.difficulty().is_zero()
+            && !self.is_primordial_pulse_pow_header(header.header())
+        {
+            return Err(ConsensusError::TheMergeDifficultyIsNotZero);
+        }
+
+        validate_against_parent_timestamp(header.header(), parent.header())?;
+        validate_against_parent_gas_limit(header, parent, self.inner.chain_spec())?;
+        validate_against_parent_eip1559_base_fee(
+            header.header(),
+            parent.header(),
+            self.inner.chain_spec(),
+        )?;
+
+        if let Some(blob_params) = self
+            .inner
+            .chain_spec()
+            .blob_params_at_timestamp(header.timestamp())
+        {
+            validate_against_parent_4844(header.header(), parent.header(), blob_params)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<ChainSpec> PulseBeaconConsensus<ChainSpec>
+where
+    ChainSpec: EthChainSpec + EthereumHardforks,
+{
+    fn is_primordial_pulse_pow_header<H: BlockHeader>(&self, header: &H) -> bool {
+        primordial_pulse_block_for_chain_id(self.inner.chain_spec().chain().id())
+            == Some(header.number())
+            && header.difficulty() == U256::from(PULSECHAIN_TTD_OFFSET)
+    }
+
+    fn validate_primordial_pulse_pow_header<H: BlockHeader>(
+        &self,
+        header: &H,
+    ) -> Result<(), ConsensusError>
+    where
+        ChainSpec: EthChainSpec<Header = H>,
+    {
+        {
+            let present_timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            if header.timestamp() > present_timestamp + ALLOWED_FUTURE_BLOCK_TIME_SECONDS {
+                return Err(ConsensusError::TimestampIsInFuture {
+                    timestamp: header.timestamp(),
+                    present_timestamp,
+                });
+            }
+        }
+
+        validate_header_extra_data(header)?;
+        validate_header_gas(header)?;
+        validate_header_base_fee(header, self.inner.chain_spec())?;
+
+        if header.blob_gas_used().is_some() {
+            return Err(ConsensusError::BlobGasUsedUnexpected);
+        }
+        if header.excess_blob_gas().is_some() {
+            return Err(ConsensusError::ExcessBlobGasUnexpected);
+        }
+        if header.parent_beacon_block_root().is_some() {
+            return Err(ConsensusError::ParentBeaconBlockRootUnexpected);
+        }
+        if header.requests_hash().is_some() {
+            return Err(ConsensusError::RequestsHashUnexpected);
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
+pub struct PulseConsensusBuilder;
+
+impl<Node> ConsensusBuilder<Node> for PulseConsensusBuilder
+where
+    Node: FullNodeTypes<
+        Types: NodeTypes<ChainSpec: EthChainSpec + EthereumHardforks, Primitives = EthPrimitives>,
+    >,
+{
+    type Consensus = Arc<PulseBeaconConsensus<<Node::Types as NodeTypes>::ChainSpec>>;
+
+    async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
+        Ok(Arc::new(PulseBeaconConsensus::new(ctx.chain_spec())))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
+pub struct PulseExecutorBuilder;
+
+impl<Types, Node> ExecutorBuilder<Node> for PulseExecutorBuilder
+where
+    Types: NodeTypes<ChainSpec = ChainSpec, Primitives = EthPrimitives>,
+    Node: FullNodeTypes<Types = Types>,
+{
+    type EVM = PulseEvmConfig;
+
+    async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
+        Ok(PulseEvmConfig {
+            inner: EthEvmConfig::new(ctx.chain_spec()),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PulseEvmConfig {
+    inner: EthEvmConfig,
+}
+
+impl BlockExecutorFactory for PulseEvmConfig {
+    type EvmFactory = EthEvmFactory;
+    type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
+    type Transaction = TransactionSigned;
+    type Receipt = Receipt;
+
+    fn evm_factory(&self) -> &Self::EvmFactory {
+        self.inner.evm_factory()
+    }
+
+    fn create_executor<'a, DB, I>(
+        &'a self,
+        evm: EthEvm<&'a mut State<DB>, I, PrecompilesMap>,
+        ctx: EthBlockExecutionCtx<'a>,
+    ) -> impl BlockExecutorFor<'a, Self, DB, I>
+    where
+        DB: Database + 'a,
+        I: InspectorFor<Self, &'a mut State<DB>> + 'a,
+    {
+        let chain_id = self.inner.chain_spec().chain().id();
+        let primordial_pulse_block =
+            primordial_pulse_block_for_chain(chain_id, self.inner.chain_spec());
+        let treasury = pulsechain_spec_for_chain_id(chain_id).and_then(|spec| spec.treasury);
+
+        PulseBlockExecutor {
+            inner: EthBlockExecutor::new(
+                evm,
+                ctx,
+                self.inner.chain_spec(),
+                self.inner.executor_factory.receipt_builder(),
+            ),
+            primordial_pulse_block,
+            chain_id,
+            treasury,
+        }
+    }
+}
+
+impl ConfigureEvm for PulseEvmConfig {
+    type Primitives = <EthEvmConfig as ConfigureEvm>::Primitives;
+    type Error = <EthEvmConfig as ConfigureEvm>::Error;
+    type NextBlockEnvCtx = <EthEvmConfig as ConfigureEvm>::NextBlockEnvCtx;
+    type BlockExecutorFactory = Self;
+    type BlockAssembler = EthBlockAssembler<ChainSpec>;
+
+    fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
+        self
+    }
+
+    fn block_assembler(&self) -> &Self::BlockAssembler {
+        self.inner.block_assembler()
+    }
+
+    fn evm_env(&self, header: &Header) -> Result<EvmEnv<SpecId>, Self::Error> {
+        let mut env = self.inner.evm_env(header)?;
+        env.cfg_env.chain_id = self.transaction_chain_id(header.number);
+        Ok(env)
+    }
+
+    fn next_evm_env(
+        &self,
+        parent: &Header,
+        attributes: &NextBlockEnvAttributes,
+    ) -> Result<EvmEnv<SpecId>, Self::Error> {
+        let mut env = self.inner.next_evm_env(parent, attributes)?;
+        env.cfg_env.chain_id = self.transaction_chain_id(parent.number.saturating_add(1));
+        Ok(env)
+    }
+
+    fn context_for_block<'a>(
+        &self,
+        block: &'a SealedBlock<Block>,
+    ) -> Result<EthBlockExecutionCtx<'a>, Self::Error> {
+        self.inner.context_for_block(block)
+    }
+
+    fn context_for_next_block(
+        &self,
+        parent: &SealedHeader,
+        attributes: Self::NextBlockEnvCtx,
+    ) -> Result<EthBlockExecutionCtx<'_>, Self::Error> {
+        self.inner.context_for_next_block(parent, attributes)
+    }
+}
+
+impl ConfigureEngineEvm<ExecutionData> for PulseEvmConfig {
+    fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<EvmEnvFor<Self>, Self::Error> {
+        let mut env = self.inner.evm_env_for_payload(payload)?;
+        env.cfg_env.chain_id = self.transaction_chain_id(payload.payload.block_number());
+        Ok(env)
+    }
+
+    fn context_for_payload<'a>(
+        &self,
+        payload: &'a ExecutionData,
+    ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
+        self.inner.context_for_payload(payload)
+    }
+
+    fn tx_iterator_for_payload(
+        &self,
+        payload: &ExecutionData,
+    ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
+        self.inner.tx_iterator_for_payload(payload)
+    }
+}
+
+impl PulseEvmConfig {
+    fn transaction_chain_id(&self, block_number: u64) -> u64 {
+        let chain_id = self.inner.chain_spec().chain().id();
+        let primordial_pulse_block = match chain_id {
+            PULSECHAIN_MAINNET_CHAIN_ID | PULSECHAIN_TESTNET_V4_CHAIN_ID => {
+                self.inner.chain_spec().paris_block().unwrap_or(u64::MAX)
+            }
+            _ => return chain_id,
+        };
+
+        transaction_chain_id_at(block_number, primordial_pulse_block, chain_id)
+    }
+}
+
+pub struct PulseBlockExecutor<'a, Evm> {
+    inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
+    primordial_pulse_block: Option<u64>,
+    chain_id: u64,
+    treasury: Option<TreasuryCredit>,
+}
+
+impl<'db, DB, E> BlockExecutor for PulseBlockExecutor<'_, E>
+where
+    DB: Database + 'db,
+    E: Evm<DB = &'db mut State<DB>, Tx = TxEnv>,
+{
+    type Transaction = TransactionSigned;
+    type Receipt = Receipt;
+    type Evm = E;
+
+    fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+        self.inner.apply_pre_execution_changes()
+    }
+
+    fn execute_transaction_without_commit(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+    ) -> Result<ResultAndState<<Self::Evm as Evm>::HaltReason>, BlockExecutionError> {
+        self.inner.execute_transaction_without_commit(tx)
+    }
+
+    fn commit_transaction(
+        &mut self,
+        output: ResultAndState<<Self::Evm as Evm>::HaltReason>,
+        tx: impl ExecutableTx<Self>,
+    ) -> Result<u64, BlockExecutionError> {
+        self.inner.commit_transaction(output, tx)
+    }
+
+    fn finish(mut self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
+        let block_number: u64 = self.inner.evm().block().number.saturating_to();
+        if should_apply_primordial_pulse(block_number, self.primordial_pulse_block) {
+            apply_primordial_pulse_state(
+                self.inner.evm_mut().db_mut(),
+                self.treasury.as_ref(),
+                self.chain_id,
+            )?;
+        }
+        self.inner.finish()
+    }
+
+    fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
+        self.inner.set_state_hook(hook)
+    }
+
+    fn evm_mut(&mut self) -> &mut Self::Evm {
+        self.inner.evm_mut()
+    }
+
+    fn evm(&self) -> &Self::Evm {
+        self.inner.evm()
+    }
+}
+
+fn primordial_pulse_block_for_chain(chain_id: u64, chain_spec: &ChainSpec) -> Option<u64> {
+    match chain_id {
+        PULSECHAIN_MAINNET_CHAIN_ID | PULSECHAIN_TESTNET_V4_CHAIN_ID => chain_spec.paris_block(),
+        _ => None,
+    }
+}
+
+fn primordial_pulse_block_for_chain_id(chain_id: u64) -> Option<u64> {
+    match chain_id {
+        PULSECHAIN_MAINNET_CHAIN_ID => Some(PRIMORDIAL_PULSE_BLOCK),
+        PULSECHAIN_TESTNET_V4_CHAIN_ID => Some(PULSECHAIN_TESTNET_V4_PRIMORDIAL_PULSE_BLOCK),
+        _ => None,
+    }
+}
+
+fn should_apply_primordial_pulse(block_number: u64, primordial_pulse_block: Option<u64>) -> bool {
+    primordial_pulse_block == Some(block_number)
+}
+
+fn apply_primordial_pulse_state<DB>(
+    state: &mut State<DB>,
+    treasury: Option<&TreasuryCredit>,
+    chain_id: u64,
+) -> Result<(), BlockExecutionError>
+where
+    DB: Database,
+{
+    let mut state_diff = EvmState::default();
+
+    apply_sacrifice_credits(state, &mut state_diff, treasury, chain_id)?;
+    replace_deposit_contract(state, &mut state_diff)?;
+
+    state.commit(state_diff);
+    Ok(())
+}
+
+fn apply_sacrifice_credits<DB>(
+    state: &mut State<DB>,
+    state_diff: &mut EvmState,
+    treasury: Option<&TreasuryCredit>,
+    chain_id: u64,
+) -> Result<(), BlockExecutionError>
+where
+    DB: Database,
+{
+    if let Some(treasury) = treasury {
+        add_balance(state, state_diff, treasury.address, treasury.amount)?;
+    }
+
+    for credit in allocation_for_chain_id(chain_id)
+        .credits()
+        .map_err(|err| internal_execution_error(format!("invalid sacrifice allocation: {err}")))?
+    {
+        add_balance(state, state_diff, credit.address, credit.amount)?;
+    }
+
+    Ok(())
+}
+
+fn replace_deposit_contract<DB>(
+    state: &mut State<DB>,
+    state_diff: &mut EvmState,
+) -> Result<(), BlockExecutionError>
+where
+    DB: Database,
+{
+    let old_contract_exists = ensure_account(state, state_diff, ETHEREUM_DEPOSIT_CONTRACT)?;
+    let old_contract = state_diff
+        .get_mut(&ETHEREUM_DEPOSIT_CONTRACT)
+        .expect("account was inserted above");
+    old_contract.info.balance = U256::ZERO;
+    old_contract
+        .info
+        .set_code(Bytecode::new_raw(NIL_CONTRACT_BYTECODE.to_vec().into()));
+    old_contract.mark_touch();
+    if old_contract_exists {
+        old_contract.mark_selfdestruct();
+    }
+
+    ensure_account(state, state_diff, PULSECHAIN_DEPOSIT_CONTRACT)?;
+
+    let mut storage = EvmStorage::default();
+    for entry in DEPOSIT_CONTRACT_STORAGE {
+        let key = go_pulse_hash_to_u256(entry.key);
+        let value = go_pulse_hash_to_u256(entry.value);
+        let original = state
+            .storage(PULSECHAIN_DEPOSIT_CONTRACT, key)
+            .map_err(|_| internal_execution_error("failed to load deposit contract storage"))?;
+        storage.insert(
+            key,
+            EvmStorageSlot::new_changed(original, value, Default::default()),
+        );
+    }
+
+    let pulse_contract = state_diff
+        .get_mut(&PULSECHAIN_DEPOSIT_CONTRACT)
+        .expect("account was inserted above");
+    pulse_contract.info.balance = U256::ZERO;
+    pulse_contract.info.nonce = 0;
+    pulse_contract.info.set_code(Bytecode::new_raw(
+        PULSE_DEPOSIT_CONTRACT_BYTECODE.to_vec().into(),
+    ));
+    pulse_contract.storage.extend(storage);
+    pulse_contract.mark_touch();
+
+    Ok(())
+}
+
+fn add_balance<DB>(
+    state: &mut State<DB>,
+    state_diff: &mut EvmState,
+    address: Address,
+    amount: U256,
+) -> Result<(), BlockExecutionError>
+where
+    DB: Database,
+{
+    ensure_account(state, state_diff, address)?;
+    let account = state_diff
+        .get_mut(&address)
+        .expect("account was inserted above");
+    account.info.balance = account
+        .info
+        .balance
+        .checked_add(amount)
+        .expect("go-pulse sacrifice credit balance overflow");
+    account.mark_touch();
+    Ok(())
+}
+
+fn ensure_account<DB>(
+    state: &mut State<DB>,
+    state_diff: &mut EvmState,
+    address: Address,
+) -> Result<bool, BlockExecutionError>
+where
+    DB: Database,
+{
+    if state_diff.contains_key(&address) {
+        return Ok(true);
+    }
+
+    let info = state
+        .basic(address)
+        .map_err(|_| internal_execution_error("failed to load account for PrimordialPulse"))?;
+    let exists = info.is_some();
+    state_diff.insert(address, Account::from(info.unwrap_or_default()));
+    Ok(exists)
+}
+
+fn go_pulse_hash_to_u256(hex_value: &str) -> U256 {
+    U256::from_be_slice(go_pulse_hex_to_hash(hex_value).as_slice())
+}
+
+fn internal_execution_error(message: impl Into<String>) -> BlockExecutionError {
+    BlockExecutionError::Internal(InternalBlockExecutionError::Other(message.into().into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+    use pulsechain_chainspec::PULSECHAIN_MAINNET;
+    use reth_ethereum::evm::revm::{
+        primitives::{B256, alloy_primitives},
+        state::AccountInfo,
+    };
+
+    #[test]
+    fn full_validation_uses_pulse_executor_and_consensus() {
+        assert_eq!(
+            PulseChainNode::assert_supported(SyncMode::FullValidation),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn pulse_consensus_allows_primordial_pulse_pos_to_pow_header() {
+        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let parent_hash = B256::repeat_byte(0x11);
+        let parent = SealedHeader::new(
+            pulse_transition_header(
+                PULSECHAIN_MAINNET.primordial_pulse_block - 1,
+                PULSECHAIN_MAINNET.shanghai_timestamp - 12,
+                B256::repeat_byte(0x01),
+                U256::ZERO,
+            ),
+            parent_hash,
+        );
+        let header = SealedHeader::new(
+            pulse_transition_header(
+                PULSECHAIN_MAINNET.primordial_pulse_block,
+                PULSECHAIN_MAINNET.shanghai_timestamp,
+                parent_hash,
+                U256::from(PULSECHAIN_TTD_OFFSET),
+            ),
+            B256::repeat_byte(0x22),
+        );
+
+        consensus.validate_header(&header).unwrap();
+        consensus
+            .validate_header_against_parent(&header, &parent)
+            .unwrap();
+    }
+
+    #[test]
+    fn pulse_consensus_rejects_late_pos_to_pow_header() {
+        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let parent_hash = B256::repeat_byte(0x33);
+        let parent = SealedHeader::new(
+            pulse_transition_header(
+                PULSECHAIN_MAINNET.primordial_pulse_block,
+                PULSECHAIN_MAINNET.shanghai_timestamp,
+                B256::repeat_byte(0x01),
+                U256::ZERO,
+            ),
+            parent_hash,
+        );
+        let header = SealedHeader::new(
+            pulse_transition_header(
+                PULSECHAIN_MAINNET.primordial_pulse_block + 1,
+                PULSECHAIN_MAINNET.shanghai_timestamp + 12,
+                parent_hash,
+                U256::from(PULSECHAIN_TTD_OFFSET),
+            ),
+            B256::repeat_byte(0x44),
+        );
+
+        assert_eq!(
+            consensus.validate_header(&header),
+            Err(ConsensusError::TheMergeDifficultyIsNotZero)
+        );
+        assert_eq!(
+            consensus.validate_header_against_parent(&header, &parent),
+            Err(ConsensusError::TheMergeDifficultyIsNotZero)
+        );
+    }
+
+    #[test]
+    fn pulse_reth_chainspec_uses_pulse_identity() {
+        let spec = pulsechain_reth_chainspec();
+        assert_eq!(spec.chain.id(), PULSECHAIN_MAINNET.chain_id);
+        assert_eq!(spec.genesis.config.chain_id, PULSECHAIN_MAINNET.chain_id);
+        assert_eq!(
+            spec.genesis.config.shanghai_time,
+            Some(PULSECHAIN_MAINNET.shanghai_timestamp)
+        );
+        assert_eq!(spec.genesis_hash(), PULSECHAIN_MAINNET.genesis_hash);
+    }
+
+    #[test]
+    fn pulse_reth_testnet_v4_chainspec_uses_go_pulse_identity() {
+        let spec = pulsechain_testnet_v4_reth_chainspec();
+        assert_eq!(spec.chain.id(), PULSECHAIN_TESTNET_V4.chain_id);
+        assert_eq!(spec.genesis.config.chain_id, PULSECHAIN_TESTNET_V4.chain_id);
+        assert_eq!(
+            spec.genesis.config.shanghai_time,
+            Some(PULSECHAIN_TESTNET_V4.shanghai_timestamp)
+        );
+        assert_eq!(spec.genesis_hash(), PULSECHAIN_TESTNET_V4.genesis_hash);
+        assert_eq!(
+            spec.paris_block_and_final_difficulty,
+            Some((
+                PULSECHAIN_TESTNET_V4.primordial_pulse_block,
+                PULSECHAIN_TESTNET_V4.terminal_total_difficulty
+            ))
+        );
+    }
+
+    #[test]
+    fn chain_parser_accepts_testnet_v4_and_devnet_alias() {
+        let testnet = PulseChainSpecParser::parse("pulsechain-testnet-v4").unwrap();
+        let devnet_alias = PulseChainSpecParser::parse("pulsechain-devnet").unwrap();
+
+        assert_eq!(testnet.chain.id(), PULSECHAIN_TESTNET_V4.chain_id);
+        assert_eq!(devnet_alias.chain.id(), PULSECHAIN_TESTNET_V4.chain_id);
+        assert!(!PulseChainSpecParser::SUPPORTED_CHAINS.contains(&"pulsechain-devnet"));
+    }
+
+    #[test]
+    fn executor_trigger_is_pulse_only_and_exact_block() {
+        let pulse_mainnet = pulsechain_reth_chainspec();
+        let pulse_testnet = pulsechain_testnet_v4_reth_chainspec();
+        let ethereum_mainnet = PulseChainSpecParser::parse("mainnet").unwrap();
+        let dev = PulseChainSpecParser::parse("dev").unwrap();
+
+        assert_eq!(
+            primordial_pulse_block_for_chain(pulse_mainnet.chain.id(), &pulse_mainnet),
+            Some(PULSECHAIN_MAINNET.primordial_pulse_block)
+        );
+        assert_eq!(
+            primordial_pulse_block_for_chain(pulse_testnet.chain.id(), &pulse_testnet),
+            Some(PULSECHAIN_TESTNET_V4.primordial_pulse_block)
+        );
+        assert_eq!(
+            primordial_pulse_block_for_chain(ethereum_mainnet.chain.id(), &ethereum_mainnet),
+            None
+        );
+        assert_eq!(primordial_pulse_block_for_chain(dev.chain.id(), &dev), None);
+
+        let fork_block = Some(PULSECHAIN_MAINNET.primordial_pulse_block);
+        assert!(!should_apply_primordial_pulse(
+            PULSECHAIN_MAINNET.primordial_pulse_block - 1,
+            fork_block
+        ));
+        assert!(should_apply_primordial_pulse(
+            PULSECHAIN_MAINNET.primordial_pulse_block,
+            fork_block
+        ));
+        assert!(!should_apply_primordial_pulse(
+            PULSECHAIN_MAINNET.primordial_pulse_block + 1,
+            fork_block
+        ));
+        assert!(!should_apply_primordial_pulse(
+            PULSECHAIN_MAINNET.primordial_pulse_block,
+            None
+        ));
+    }
+
+    #[test]
+    fn evm_env_uses_ethereum_chain_id_before_pulse_and_pulse_chain_id_at_fork() {
+        let config = PulseEvmConfig {
+            inner: EthEvmConfig::new(pulsechain_reth_chainspec()),
+        };
+
+        let mut header = Header {
+            number: PULSECHAIN_MAINNET.primordial_pulse_block - 1,
+            timestamp: 1_683_786_514,
+            ..Default::default()
+        };
+        assert_eq!(config.evm_env(&header).unwrap().cfg_env.chain_id, 1);
+
+        header.number = PULSECHAIN_MAINNET.primordial_pulse_block;
+        header.timestamp = PULSECHAIN_MAINNET.shanghai_timestamp;
+        assert_eq!(
+            config.evm_env(&header).unwrap().cfg_env.chain_id,
+            PULSECHAIN_MAINNET.chain_id
+        );
+    }
+
+    #[test]
+    fn testnet_v4_evm_env_uses_ethereum_chain_id_before_pulse_and_testnet_chain_id_at_fork() {
+        let config = PulseEvmConfig {
+            inner: EthEvmConfig::new(pulsechain_testnet_v4_reth_chainspec()),
+        };
+
+        let mut header = Header {
+            number: PULSECHAIN_TESTNET_V4.primordial_pulse_block - 1,
+            timestamp: 1_682_700_368,
+            ..Default::default()
+        };
+        assert_eq!(config.evm_env(&header).unwrap().cfg_env.chain_id, 1);
+
+        header.number = PULSECHAIN_TESTNET_V4.primordial_pulse_block;
+        header.timestamp = PULSECHAIN_TESTNET_V4.shanghai_timestamp;
+        assert_eq!(
+            config.evm_env(&header).unwrap().cfg_env.chain_id,
+            PULSECHAIN_TESTNET_V4.chain_id
+        );
+    }
+
+    fn pulse_transition_header(
+        number: u64,
+        timestamp: u64,
+        parent_hash: B256,
+        difficulty: U256,
+    ) -> Header {
+        Header {
+            parent_hash,
+            number,
+            timestamp,
+            difficulty,
+            gas_limit: 30_000_000,
+            gas_used: 15_000_000,
+            base_fee_per_gas: Some(1_000_000_000),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_apply_sacrifice_credits() {
+        let mut state = State::builder().build();
+        let mut state_diff = EvmState::default();
+
+        let treasury = TreasuryCredit {
+            address: alloy_primitives::address!("0xceB59257450820132aB274ED61C49E5FD96E8868"),
+            amount: U256::from_str("0xC9F2C9CD04674EDEA40000000").unwrap(),
+        };
+
+        apply_sacrifice_credits(
+            &mut state,
+            &mut state_diff,
+            Some(&treasury),
+            PULSECHAIN_MAINNET_CHAIN_ID,
+        )
+        .unwrap();
+        state.commit(state_diff);
+
+        assert_eq!(
+            account_balance(&mut state, treasury.address),
+            treasury.amount
+        );
+    }
+
+    #[test]
+    fn sacrifice_credits_are_additive() {
+        let mut state = State::builder().build();
+        let recipient = mainnet_known_sacrifice_recipient();
+        insert_account_with_balance(&mut state, recipient, U256::from(7u64));
+
+        let mut state_diff = EvmState::default();
+        apply_sacrifice_credits(
+            &mut state,
+            &mut state_diff,
+            PULSECHAIN_MAINNET.treasury.as_ref(),
+            PULSECHAIN_MAINNET_CHAIN_ID,
+        )
+        .unwrap();
+        state.commit(state_diff);
+
+        assert_eq!(
+            account_balance(&mut state, recipient),
+            U256::from(64_000_000_000_000_000_007u128)
+        );
+    }
+
+    #[test]
+    fn testnet_v4_sacrifice_uses_testnet_allocation_and_treasury() {
+        let mut state = State::builder().build();
+        let mut state_diff = EvmState::default();
+
+        apply_sacrifice_credits(
+            &mut state,
+            &mut state_diff,
+            PULSECHAIN_TESTNET_V4.treasury.as_ref(),
+            PULSECHAIN_TESTNET_V4_CHAIN_ID,
+        )
+        .unwrap();
+        state.commit(state_diff);
+
+        assert_eq!(
+            account_balance(&mut state, testnet_v4_differential_sacrifice_recipient()),
+            U256::from(64_000_000_000_000_000_000u128)
+        );
+
+        let treasury = PULSECHAIN_TESTNET_V4.treasury.unwrap();
+        assert_eq!(
+            account_balance(&mut state, treasury.address),
+            treasury.amount
+        );
+    }
+
+    #[test]
+    fn primordial_pulse_applies_sacrifice_then_deposit_replacement() {
+        let mut state = State::builder().build();
+
+        apply_primordial_pulse_state(
+            &mut state,
+            PULSECHAIN_MAINNET.treasury.as_ref(),
+            PULSECHAIN_MAINNET_CHAIN_ID,
+        )
+        .unwrap();
+
+        assert_eq!(
+            account_balance(&mut state, mainnet_known_sacrifice_recipient()),
+            U256::from(64_000_000_000_000_000_000u128)
+        );
+        assert_pulse_deposit_contract_replaced(&mut state);
+    }
+
+    #[test]
+    fn testnet_v4_primordial_pulse_applies_testnet_sacrifice_treasury_and_deposit_replacement() {
+        let mut state = State::builder().build();
+
+        apply_primordial_pulse_state(
+            &mut state,
+            PULSECHAIN_TESTNET_V4.treasury.as_ref(),
+            PULSECHAIN_TESTNET_V4_CHAIN_ID,
+        )
+        .unwrap();
+
+        assert_eq!(
+            account_balance(&mut state, testnet_v4_differential_sacrifice_recipient()),
+            U256::from(64_000_000_000_000_000_000u128)
+        );
+        let treasury = PULSECHAIN_TESTNET_V4.treasury.unwrap();
+        assert_eq!(
+            account_balance(&mut state, treasury.address),
+            treasury.amount
+        );
+        assert_pulse_deposit_contract_replaced(&mut state);
+    }
+
+    #[test]
+    fn replace_deposit_contract_matches_go_pulse_test() {
+        let mut state = State::builder().build();
+        let mut state_diff = EvmState::default();
+
+        replace_deposit_contract(&mut state, &mut state_diff).unwrap();
+        state.commit(state_diff);
+
+        let old_account = state
+            .basic(ETHEREUM_DEPOSIT_CONTRACT)
+            .unwrap()
+            .expect("Ethereum deposit contract should exist in empty-state replacement");
+        assert_eq!(
+            old_account.code.unwrap().original_byte_slice(),
+            NIL_CONTRACT_BYTECODE
+        );
+
+        assert_pulse_deposit_contract_replaced(&mut state);
+    }
+
+    #[test]
+    fn replace_deposit_contract_selfdestructs_existing_eth_deposit_contract() {
+        let mut state = State::builder().build();
+        insert_account_with_code_and_balance(
+            &mut state,
+            ETHEREUM_DEPOSIT_CONTRACT,
+            &[0x60, 0x00, 0x60, 0x00],
+            U256::from(123u64),
+        );
+
+        let mut state_diff = EvmState::default();
+        replace_deposit_contract(&mut state, &mut state_diff).unwrap();
+        state.commit(state_diff);
+
+        assert!(
+            state.basic(ETHEREUM_DEPOSIT_CONTRACT).unwrap().is_none(),
+            "existing Ethereum deposit contract should be removed after selfdestruct"
+        );
+        assert_pulse_deposit_contract_replaced(&mut state);
+    }
+
+    fn assert_pulse_deposit_contract_replaced<DB>(state: &mut State<DB>)
+    where
+        DB: Database,
+    {
+        let account = state
+            .basic(PULSECHAIN_DEPOSIT_CONTRACT)
+            .unwrap()
+            .expect("PulseChain deposit contract should exist");
+        assert_eq!(account.balance, U256::ZERO);
+        assert_eq!(
+            account.code.unwrap().original_byte_slice(),
+            PULSE_DEPOSIT_CONTRACT_BYTECODE
+        );
+
+        for entry in DEPOSIT_CONTRACT_STORAGE {
+            let actual = state
+                .storage(
+                    PULSECHAIN_DEPOSIT_CONTRACT,
+                    go_pulse_hash_to_u256(entry.key),
+                )
+                .unwrap();
+            assert_eq!(actual, go_pulse_hash_to_u256(entry.value));
+        }
+    }
+
+    fn account_balance<DB>(state: &mut State<DB>, address: Address) -> U256
+    where
+        DB: Database,
+    {
+        state
+            .basic(address)
+            .unwrap()
+            .map(|account| account.balance)
+            .unwrap_or_default()
+    }
+
+    fn insert_account_with_balance<DB>(state: &mut State<DB>, address: Address, balance: U256)
+    where
+        DB: Database,
+    {
+        let mut account = Account::from(AccountInfo::default());
+        account.info.balance = balance;
+        account.mark_touch();
+
+        state.basic(address).unwrap();
+        let mut state_diff = EvmState::default();
+        state_diff.insert(address, account);
+        state.commit(state_diff);
+    }
+
+    fn insert_account_with_code_and_balance<DB>(
+        state: &mut State<DB>,
+        address: Address,
+        code: &[u8],
+        balance: U256,
+    ) where
+        DB: Database,
+    {
+        let mut account = Account::from(AccountInfo::default());
+        account.info.balance = balance;
+        account
+            .info
+            .set_code(Bytecode::new_raw(code.to_vec().into()));
+        account.mark_touch();
+
+        state.basic(address).unwrap();
+        let mut state_diff = EvmState::default();
+        state_diff.insert(address, account);
+        state.commit(state_diff);
+    }
+
+    fn mainnet_known_sacrifice_recipient() -> Address {
+        Address::from([
+            0x00, 0x00, 0x00, 0x00, 0x5d, 0xce, 0xe1, 0x1e, 0x13, 0xfb, 0x53, 0x6f, 0xa4, 0x0d,
+            0x65, 0x45, 0x0f, 0x53, 0xc5, 0xa8,
+        ])
+    }
+
+    fn testnet_v4_differential_sacrifice_recipient() -> Address {
+        Address::from([
+            0x00, 0x82, 0x7a, 0x4d, 0x91, 0x02, 0x8b, 0x7d, 0x0e, 0xba, 0x24, 0x1f, 0x7f, 0x1a,
+            0x2e, 0xc2, 0xca, 0xa5, 0x6b, 0x78,
+        ])
+    }
+}

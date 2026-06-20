@@ -1,0 +1,4 @@
+/target
+/go-pulse-repo/*
+*.log
+/*.json

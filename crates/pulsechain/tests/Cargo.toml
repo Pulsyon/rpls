@@ -1,0 +1,12 @@
+[package]
+name = "pulsechain-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+alloy-primitives.workspace = true
+pulsechain-chainspec.workspace = true
+pulsechain-evm.workspace = true
+pulsechain-hardforks.workspace = true
+pulsechain-rpc.workspace = true

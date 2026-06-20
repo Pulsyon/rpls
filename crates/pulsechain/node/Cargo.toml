@@ -1,0 +1,15 @@
+[package]
+name = "pulsechain-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pulsechain-chainspec.workspace = true
+pulsechain-consensus.workspace = true
+pulsechain-evm.workspace = true
+pulsechain-hardforks.workspace = true
+eyre.workspace = true
+reth-cli.workspace = true
+reth-ethereum.workspace = true
+thiserror.workspace = true

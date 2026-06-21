@@ -78,6 +78,10 @@ use reth_ethereum::{
 use thiserror::Error;
 
 const ALLOWED_FUTURE_BLOCK_TIME_SECONDS: u64 = 15;
+const DIFFICULTY_BOUND_DIVISOR: u64 = 2048;
+const MINIMUM_DIFFICULTY: u64 = 131_072;
+const FRONTIER_DURATION_LIMIT_SECONDS: u64 = 13;
+const EXP_DIFFICULTY_PERIOD: u64 = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncMode {
@@ -233,6 +237,10 @@ where
             return self.validate_primordial_pulse_pow_header(header.header());
         }
 
+        if self.is_post_primordial_pulse_pow_header(header.header()) {
+            return Err(ConsensusError::TheMergeDifficultyIsNotZero);
+        }
+
         self.validate_header_standalone(header.header())
     }
 
@@ -251,6 +259,9 @@ where
         }
 
         validate_against_parent_timestamp(header.header(), parent.header())?;
+        if !header.difficulty().is_zero() {
+            self.validate_pow_difficulty_against_parent(header.header(), parent.header())?;
+        }
         validate_against_parent_gas_limit(header, parent, self.inner.chain_spec())?;
         validate_against_parent_eip1559_base_fee(
             header.header(),
@@ -278,33 +289,28 @@ where
     where
         ChainSpec: EthChainSpec<Header = H>,
     {
+        if header.difficulty().is_zero() {
+            return self.validate_pos_header_standalone(header);
+        }
+
+        self.validate_pow_header_standalone(header)
+    }
+
+    fn validate_pos_header_standalone<H: BlockHeader>(
+        &self,
+        header: &H,
+    ) -> Result<(), ConsensusError>
+    where
+        ChainSpec: EthChainSpec<Header = H>,
+    {
         let chain_spec = self.inner.chain_spec();
-        let is_post_merge = chain_spec.is_paris_active_at_block(header.number());
 
-        if is_post_merge {
-            if !header.difficulty().is_zero() {
-                return Err(ConsensusError::TheMergeDifficultyIsNotZero);
-            }
+        if !header.nonce().is_some_and(|nonce| nonce.is_zero()) {
+            return Err(ConsensusError::TheMergeNonceIsNotZero);
+        }
 
-            if !header.nonce().is_some_and(|nonce| nonce.is_zero()) {
-                return Err(ConsensusError::TheMergeNonceIsNotZero);
-            }
-
-            if header.ommers_hash() != EMPTY_OMMER_ROOT_HASH {
-                return Err(ConsensusError::TheMergeOmmerRootIsNotEmpty);
-            }
-        } else {
-            let present_timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            if header.timestamp() > present_timestamp + ALLOWED_FUTURE_BLOCK_TIME_SECONDS {
-                return Err(ConsensusError::TimestampIsInFuture {
-                    timestamp: header.timestamp(),
-                    present_timestamp,
-                });
-            }
+        if header.ommers_hash() != EMPTY_OMMER_ROOT_HASH {
+            return Err(ConsensusError::TheMergeOmmerRootIsNotEmpty);
         }
 
         validate_header_extra_data(header)?;
@@ -339,37 +345,39 @@ where
         Ok(())
     }
 
-    fn is_primordial_pulse_pow_header<H: BlockHeader>(&self, header: &H) -> bool {
-        primordial_pulse_block_for_chain_id(self.inner.chain_spec().chain().id())
-            == Some(header.number())
-            && header.difficulty() == U256::from(PULSECHAIN_TTD_OFFSET)
-    }
-
-    fn validate_primordial_pulse_pow_header<H: BlockHeader>(
+    fn validate_pow_header_standalone<H: BlockHeader>(
         &self,
         header: &H,
     ) -> Result<(), ConsensusError>
     where
         ChainSpec: EthChainSpec<Header = H>,
     {
-        {
-            let present_timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+        let chain_spec = self.inner.chain_spec();
+        let present_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
-            if header.timestamp() > present_timestamp + ALLOWED_FUTURE_BLOCK_TIME_SECONDS {
-                return Err(ConsensusError::TimestampIsInFuture {
-                    timestamp: header.timestamp(),
-                    present_timestamp,
-                });
-            }
+        if header.timestamp() > present_timestamp + ALLOWED_FUTURE_BLOCK_TIME_SECONDS {
+            return Err(ConsensusError::TimestampIsInFuture {
+                timestamp: header.timestamp(),
+                present_timestamp,
+            });
         }
 
         validate_header_extra_data(header)?;
         validate_header_gas(header)?;
-        validate_header_base_fee(header, self.inner.chain_spec())?;
+        validate_header_base_fee(header, chain_spec)?;
 
+        if pulse_shanghai_active_at(chain_spec, header.number(), header.timestamp())
+            || header.withdrawals_root().is_some()
+        {
+            return Err(ConsensusError::WithdrawalsRootUnexpected);
+        }
+
+        if chain_spec.is_cancun_active_at_timestamp(header.timestamp()) {
+            return Err(ConsensusError::BlobGasUsedUnexpected);
+        }
         if header.blob_gas_used().is_some() {
             return Err(ConsensusError::BlobGasUsedUnexpected);
         }
@@ -384,6 +392,51 @@ where
         }
 
         Ok(())
+    }
+
+    fn validate_pow_difficulty_against_parent<H: BlockHeader>(
+        &self,
+        header: &H,
+        parent: &H,
+    ) -> Result<(), ConsensusError>
+    where
+        ChainSpec: EthChainSpec<Header = H>,
+    {
+        let expected =
+            calculate_pow_difficulty(self.inner.chain_spec(), header.timestamp(), parent);
+        if header.difficulty() != expected {
+            return Err(ConsensusError::Other(
+                PulseConsensusError::InvalidPowDifficulty {
+                    got: header.difficulty(),
+                    expected,
+                }
+                .to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn is_primordial_pulse_pow_header<H: BlockHeader>(&self, header: &H) -> bool {
+        primordial_pulse_block_for_chain_id(self.inner.chain_spec().chain().id())
+            == Some(header.number())
+            && header.difficulty() == U256::from(PULSECHAIN_TTD_OFFSET)
+    }
+
+    fn is_post_primordial_pulse_pow_header<H: BlockHeader>(&self, header: &H) -> bool {
+        !header.difficulty().is_zero()
+            && primordial_pulse_block_for_chain_id(self.inner.chain_spec().chain().id())
+                .is_some_and(|primordial_pulse_block| header.number() >= primordial_pulse_block)
+    }
+
+    fn validate_primordial_pulse_pow_header<H: BlockHeader>(
+        &self,
+        header: &H,
+    ) -> Result<(), ConsensusError>
+    where
+        ChainSpec: EthChainSpec<Header = H>,
+    {
+        self.validate_pow_header_standalone(header)
     }
 }
 
@@ -698,6 +751,143 @@ where
     chain_spec.is_shanghai_active_at_timestamp(timestamp)
 }
 
+fn calculate_pow_difficulty<ChainSpec, H>(
+    chain_spec: &ChainSpec,
+    timestamp: u64,
+    parent: &H,
+) -> U256
+where
+    ChainSpec: EthChainSpec + EthereumHardforks,
+    H: BlockHeader,
+{
+    let next_block = parent.number().saturating_add(1);
+    if primordial_pulse_block_for_chain_id(chain_spec.chain().id()) == Some(next_block) {
+        return U256::from(PULSECHAIN_TTD_OFFSET);
+    }
+
+    if chain_spec
+        .ethereum_fork_activation(EthereumHardfork::GrayGlacier)
+        .active_at_block(next_block)
+    {
+        return calculate_dynamic_pow_difficulty(timestamp, parent, 11_400_000);
+    }
+    if chain_spec
+        .ethereum_fork_activation(EthereumHardfork::ArrowGlacier)
+        .active_at_block(next_block)
+    {
+        return calculate_dynamic_pow_difficulty(timestamp, parent, 10_700_000);
+    }
+    if chain_spec
+        .ethereum_fork_activation(EthereumHardfork::London)
+        .active_at_block(next_block)
+    {
+        return calculate_dynamic_pow_difficulty(timestamp, parent, 9_700_000);
+    }
+    if chain_spec
+        .ethereum_fork_activation(EthereumHardfork::MuirGlacier)
+        .active_at_block(next_block)
+    {
+        return calculate_dynamic_pow_difficulty(timestamp, parent, 9_000_000);
+    }
+    if chain_spec
+        .ethereum_fork_activation(EthereumHardfork::Constantinople)
+        .active_at_block(next_block)
+    {
+        return calculate_dynamic_pow_difficulty(timestamp, parent, 5_000_000);
+    }
+    if chain_spec
+        .ethereum_fork_activation(EthereumHardfork::Byzantium)
+        .active_at_block(next_block)
+    {
+        return calculate_dynamic_pow_difficulty(timestamp, parent, 3_000_000);
+    }
+    if chain_spec
+        .ethereum_fork_activation(EthereumHardfork::Homestead)
+        .active_at_block(next_block)
+    {
+        return calculate_homestead_pow_difficulty(timestamp, parent);
+    }
+
+    calculate_frontier_pow_difficulty(timestamp, parent)
+}
+
+fn calculate_dynamic_pow_difficulty<H: BlockHeader>(
+    timestamp: u64,
+    parent: &H,
+    bomb_delay: u64,
+) -> U256 {
+    let parent_difficulty = parent.difficulty();
+    let adjustment = parent_difficulty / U256::from(DIFFICULTY_BOUND_DIVISOR);
+    let elapsed = timestamp.saturating_sub(parent.timestamp()) / 9;
+    let uncle_factor = if parent.ommers_hash() == EMPTY_OMMER_ROOT_HASH {
+        1
+    } else {
+        2
+    };
+    let adjustment_factor = elapsed.abs_diff(uncle_factor).min(99);
+    let adjustment = adjustment * U256::from(adjustment_factor);
+
+    let mut difficulty = if elapsed >= uncle_factor {
+        parent_difficulty.saturating_sub(adjustment)
+    } else {
+        parent_difficulty.saturating_add(adjustment)
+    };
+    difficulty = difficulty.max(U256::from(MINIMUM_DIFFICULTY));
+
+    let bomb_delay_from_parent = bomb_delay.saturating_sub(1);
+    if parent.number() >= bomb_delay_from_parent {
+        let fake_block_number = parent.number() - bomb_delay_from_parent;
+        let period_count = fake_block_number / EXP_DIFFICULTY_PERIOD;
+        if period_count > 1 {
+            difficulty = difficulty.saturating_add(U256::from(1) << (period_count - 2));
+        }
+    }
+
+    difficulty
+}
+
+fn calculate_homestead_pow_difficulty<H: BlockHeader>(timestamp: u64, parent: &H) -> U256 {
+    let parent_difficulty = parent.difficulty();
+    let adjustment = parent_difficulty / U256::from(DIFFICULTY_BOUND_DIVISOR);
+    let elapsed = timestamp.saturating_sub(parent.timestamp()) / 10;
+    let adjustment_factor = elapsed.abs_diff(1).min(99);
+    let adjustment = adjustment * U256::from(adjustment_factor);
+
+    let mut difficulty = if elapsed >= 1 {
+        parent_difficulty.saturating_sub(adjustment)
+    } else {
+        parent_difficulty.saturating_add(adjustment)
+    };
+    difficulty = difficulty.max(U256::from(MINIMUM_DIFFICULTY));
+
+    let period_count = (parent.number() + 1) / EXP_DIFFICULTY_PERIOD;
+    if period_count > 1 {
+        difficulty = difficulty.saturating_add(U256::from(1) << (period_count - 2));
+    }
+
+    difficulty
+}
+
+fn calculate_frontier_pow_difficulty<H: BlockHeader>(timestamp: u64, parent: &H) -> U256 {
+    let parent_difficulty = parent.difficulty();
+    let adjustment = parent_difficulty / U256::from(DIFFICULTY_BOUND_DIVISOR);
+    let mut difficulty =
+        if timestamp.saturating_sub(parent.timestamp()) < FRONTIER_DURATION_LIMIT_SECONDS {
+            parent_difficulty.saturating_add(adjustment)
+        } else {
+            parent_difficulty.saturating_sub(adjustment)
+        };
+    difficulty = difficulty.max(U256::from(MINIMUM_DIFFICULTY));
+
+    let period_count = (parent.number() + 1) / EXP_DIFFICULTY_PERIOD;
+    if period_count > 1 {
+        difficulty = difficulty.saturating_add(U256::from(1) << (period_count - 2));
+        difficulty = difficulty.max(U256::from(MINIMUM_DIFFICULTY));
+    }
+
+    difficulty
+}
+
 fn primordial_pulse_block_for_chain_id(chain_id: u64) -> Option<u64> {
     match chain_id {
         PULSECHAIN_MAINNET_CHAIN_ID => Some(PRIMORDIAL_PULSE_BLOCK),
@@ -945,7 +1135,7 @@ mod tests {
         let parent = SealedHeader::new(
             pulse_transition_header(
                 PULSECHAIN_MAINNET.primordial_pulse_block - 1,
-                PULSECHAIN_MAINNET.shanghai_timestamp - 12,
+                PULSECHAIN_MAINNET.shanghai_timestamp - 24,
                 B256::repeat_byte(0x01),
                 U256::ZERO,
             ),
@@ -954,7 +1144,7 @@ mod tests {
         let header = SealedHeader::new(
             pulse_transition_header(
                 PULSECHAIN_MAINNET.primordial_pulse_block,
-                PULSECHAIN_MAINNET.shanghai_timestamp,
+                PULSECHAIN_MAINNET.shanghai_timestamp - 12,
                 parent_hash,
                 U256::from(PULSECHAIN_TTD_OFFSET),
             ),
@@ -965,6 +1155,37 @@ mod tests {
         consensus
             .validate_header_against_parent(&header, &parent)
             .unwrap();
+    }
+
+    #[test]
+    fn pulse_consensus_rejects_invalid_parent_dependent_pow_difficulty() {
+        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let parent_hash = B256::repeat_byte(0x23);
+        let parent_header = pulse_transition_header(
+            15_050_000 - 1,
+            1_000,
+            B256::repeat_byte(0x21),
+            U256::from(1_000_000_000u64),
+        );
+        let parent = SealedHeader::new(parent_header, parent_hash);
+
+        let mut header = pulse_transition_header(
+            15_050_000,
+            1_012,
+            parent_hash,
+            calculate_pow_difficulty(consensus.inner.chain_spec(), 1_012, parent.header())
+                + U256::from(1),
+        );
+        header.withdrawals_root = None;
+        let header = SealedHeader::new(header, B256::repeat_byte(0x24));
+
+        let err = consensus
+            .validate_header_against_parent(&header, &parent)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid PulseChain PoW difficulty")
+        );
     }
 
     #[test]
@@ -1001,6 +1222,61 @@ mod tests {
     }
 
     #[test]
+    fn pulse_consensus_rejects_wrong_primordial_pulse_pow_difficulty() {
+        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let header = SealedHeader::new(
+            pulse_transition_header(
+                PULSECHAIN_MAINNET.primordial_pulse_block,
+                PULSECHAIN_MAINNET.shanghai_timestamp,
+                B256::repeat_byte(0x45),
+                U256::from(PULSECHAIN_TTD_OFFSET + 1),
+            ),
+            B256::repeat_byte(0x46),
+        );
+
+        assert_eq!(
+            consensus.validate_header(&header),
+            Err(ConsensusError::TheMergeDifficultyIsNotZero)
+        );
+    }
+
+    #[test]
+    fn pulse_consensus_rejects_shanghai_active_primordial_pulse_pow_header() {
+        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let header = SealedHeader::new(
+            pulse_transition_header(
+                PULSECHAIN_MAINNET.primordial_pulse_block,
+                PULSECHAIN_MAINNET.shanghai_timestamp,
+                B256::repeat_byte(0x47),
+                U256::from(PULSECHAIN_TTD_OFFSET),
+            ),
+            B256::repeat_byte(0x48),
+        );
+
+        assert_eq!(
+            consensus.validate_header(&header),
+            Err(ConsensusError::WithdrawalsRootUnexpected)
+        );
+    }
+
+    #[test]
+    fn pulse_consensus_rejects_withdrawals_root_on_primordial_pulse_pow_header() {
+        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let mut header = pulse_transition_header(
+            PULSECHAIN_MAINNET.primordial_pulse_block,
+            PULSECHAIN_MAINNET.shanghai_timestamp - 12,
+            B256::repeat_byte(0x49),
+            U256::from(PULSECHAIN_TTD_OFFSET),
+        );
+        header.withdrawals_root = Some(B256::ZERO);
+
+        assert_eq!(
+            consensus.validate_header(&SealedHeader::new(header, B256::repeat_byte(0x4a))),
+            Err(ConsensusError::WithdrawalsRootUnexpected)
+        );
+    }
+
+    #[test]
     fn pulse_consensus_uses_go_pulse_shanghai_rule_for_header_withdrawals() {
         let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
         let mut header = pulse_transition_header(
@@ -1030,6 +1306,24 @@ mod tests {
         assert_eq!(
             consensus.validate_header(&SealedHeader::new(pulse_header, B256::repeat_byte(0x59))),
             Err(ConsensusError::WithdrawalsRootUnexpected)
+        );
+    }
+
+    #[test]
+    fn pulse_consensus_treats_zero_difficulty_headers_as_pos_before_primordial_pulse() {
+        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let mut header = pulse_transition_header(
+            PULSECHAIN_MAINNET.primordial_pulse_block - 1,
+            ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP,
+            B256::repeat_byte(0x60),
+            U256::ZERO,
+        );
+        header.withdrawals_root = Some(B256::ZERO);
+        header.ommers_hash = B256::repeat_byte(0x61);
+
+        assert_eq!(
+            consensus.validate_header(&SealedHeader::new(header, B256::repeat_byte(0x62))),
+            Err(ConsensusError::TheMergeOmmerRootIsNotEmpty)
         );
     }
 

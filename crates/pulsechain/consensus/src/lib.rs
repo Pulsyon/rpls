@@ -22,6 +22,8 @@ pub enum PulseConsensusError {
         "PulseChain full validation requires PrimordialPulse fork-state mutation in the block executor"
     )]
     PrimordialPulseStateTransitionNotWired,
+    #[error("invalid PulseChain PoW difficulty: have {got}, want {expected}")]
+    InvalidPowDifficulty { got: U256, expected: U256 },
 }
 
 pub const fn primordial_pulse_difficulty(block_number: u64) -> Option<u64> {

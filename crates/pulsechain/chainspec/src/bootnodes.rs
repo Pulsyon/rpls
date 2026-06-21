@@ -1,6 +1,7 @@
+use crate::{PulseChainSpec, pulsechain_spec_for_chain_id};
 use pulsechain_hardforks::{PULSECHAIN_MAINNET_CHAIN_ID, PULSECHAIN_TESTNET_V4_CHAIN_ID};
 use reth_ethereum::{
-    chainspec::{EthChainSpec, Hardforks},
+    chainspec::{EthChainSpec, ForkFilter, ForkFilterKey, Hardforks, Head},
     cli::interface::{Cli, Commands},
 };
 use reth_network::{NetworkHandle, NetworkManager, PeersInfo, primitives::BasicNetworkPrimitives};
@@ -105,6 +106,43 @@ where
     Ok(())
 }
 
+fn pulse_fork_filter_keys(pulse_spec: PulseChainSpec) -> Vec<ForkFilterKey> {
+    let mut forks = Vec::with_capacity(pulse_spec.ethereum_block_forks.len() + 2);
+    forks.extend(
+        pulse_spec
+            .ethereum_block_forks
+            .iter()
+            .map(|fork| ForkFilterKey::Block(fork.block)),
+    );
+    forks.push(ForkFilterKey::Block(pulse_spec.primordial_pulse_block));
+    forks.push(ForkFilterKey::Time(pulse_spec.shanghai_timestamp));
+    forks
+}
+
+fn pulse_fork_filter_for_chain_id(chain_id: u64, head: Head) -> Option<ForkFilter> {
+    let pulse_spec = pulsechain_spec_for_chain_id(chain_id)?;
+    Some(ForkFilter::new(
+        head,
+        pulse_spec.genesis_hash,
+        0,
+        pulse_fork_filter_keys(pulse_spec),
+    ))
+}
+
+fn apply_pulse_fork_filter<C, N>(network_config: &mut reth_network::NetworkConfig<C, N>, head: Head)
+where
+    N: reth_network::NetworkPrimitives,
+{
+    let Some(fork_filter) = pulse_fork_filter_for_chain_id(network_config.chain_id, head) else {
+        return;
+    };
+
+    let fork_id = fork_filter.current();
+    network_config.fork_filter = fork_filter;
+    network_config.status.forkid = fork_id;
+    info!(target: "rpls::cli", ?fork_id, "Applied go-pulse fork ID filter");
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PulseNetworkBuilder;
 
@@ -126,6 +164,7 @@ where
         let network_config_builder = ctx.network_config_builder()?;
         let mut network_config = ctx.build_network_config(network_config_builder);
         apply_pulse_dns_discovery(&mut network_config)?;
+        apply_pulse_fork_filter(&mut network_config, ctx.head());
 
         let network = NetworkManager::builder(network_config).await?;
         let handle = ctx.start_network(network, pool);
@@ -137,6 +176,31 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::B256;
+    use reth_ethereum::chainspec::{ForkHash, ForkId};
+
+    fn head(number: u64, timestamp: u64) -> Head {
+        Head {
+            number,
+            timestamp,
+            hash: B256::ZERO,
+            difficulty: Default::default(),
+            total_difficulty: Default::default(),
+        }
+    }
+
+    fn fork_id(hash: [u8; 4], next: u64) -> ForkId {
+        ForkId {
+            hash: ForkHash(hash),
+            next,
+        }
+    }
+
+    fn pulse_fork_id(chain_id: u64, number: u64, timestamp: u64) -> ForkId {
+        pulse_fork_filter_for_chain_id(chain_id, head(number, timestamp))
+            .expect("PulseChain fork filter must exist")
+            .current()
+    }
 
     #[test]
     fn pulse_dns_discovery_urls_match_go_pulse() {
@@ -166,5 +230,67 @@ mod tests {
             url.parse::<reth_dns_discovery::tree::LinkEntry>()
                 .expect("Pulse DNS discovery URL must parse as an ENR tree link");
         }
+    }
+
+    #[test]
+    fn mainnet_fork_ids_match_go_pulse() {
+        let cases = [
+            (0, 0, fork_id([0xfc, 0x64, 0xec, 0x04], 1_150_000)),
+            (1_149_999, 0, fork_id([0xfc, 0x64, 0xec, 0x04], 1_150_000)),
+            (1_150_000, 0, fork_id([0x97, 0xc2, 0xc3, 0x4c], 1_920_000)),
+            (15_050_000, 0, fork_id([0xf0, 0xaf, 0xd0, 0xe3], 17_233_000)),
+            (
+                17_232_999,
+                1_683_786_514,
+                fork_id([0xf0, 0xaf, 0xd0, 0xe3], 17_233_000),
+            ),
+            (
+                17_233_000,
+                1_683_786_514,
+                fork_id([0xec, 0x48, 0xdb, 0xcc], 1_683_786_515),
+            ),
+            (
+                17_233_000,
+                1_683_786_515,
+                fork_id([0x62, 0xeb, 0xcf, 0xaf], 0),
+            ),
+        ];
+
+        for (number, timestamp, expected) in cases {
+            assert_eq!(
+                pulse_fork_id(PULSECHAIN_MAINNET_CHAIN_ID, number, timestamp),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn testnet_v4_fork_ids_match_go_pulse() {
+        let cases = [
+            (0, 0, fork_id([0xfc, 0x64, 0xec, 0x04], 1_150_000)),
+            (15_050_000, 0, fork_id([0xf0, 0xaf, 0xd0, 0xe3], 16_492_700)),
+            (
+                16_492_700,
+                1_682_700_368,
+                fork_id([0x45, 0x36, 0x78, 0x77], 1_682_700_369),
+            ),
+            (
+                16_492_700,
+                1_682_700_369,
+                fork_id([0x56, 0x82, 0xe2, 0x87], 0),
+            ),
+        ];
+
+        for (number, timestamp, expected) in cases {
+            assert_eq!(
+                pulse_fork_id(PULSECHAIN_TESTNET_V4_CHAIN_ID, number, timestamp),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn non_pulse_chains_do_not_get_a_pulse_fork_filter() {
+        assert!(pulse_fork_filter_for_chain_id(1, head(0, 0)).is_none());
     }
 }

@@ -1,4 +1,5 @@
 /target
-/go-pulse-repo/*
+/go-pulse-repo/
 *.log
 /*.json
+.DS_Store*

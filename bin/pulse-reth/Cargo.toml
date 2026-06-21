@@ -12,4 +12,3 @@ pulsechain-hardforks.workspace = true
 pulsechain-node.workspace = true
 reth-ethereum.workspace = true
 reth-cli-util.workspace = true
-reth-network-peers.workspace = true

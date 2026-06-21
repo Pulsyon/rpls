@@ -5372,7 +5372,6 @@ dependencies = [
  "pulsechain-node",
  "reth-cli-util",
  "reth-ethereum",
- "reth-network-peers",
 ]
 
 [[package]]
@@ -5380,7 +5379,19 @@ name = "pulsechain-chainspec"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "clap",
+ "eyre",
  "pulsechain-hardforks",
+ "reth-cli",
+ "reth-dns-discovery",
+ "reth-ethereum",
+ "reth-network",
+ "reth-network-peers",
+ "reth-node-api",
+ "reth-node-builder",
+ "reth-rpc-server-types",
+ "reth-transaction-pool",
+ "tracing",
 ]
 
 [[package]]

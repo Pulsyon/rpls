@@ -24,10 +24,17 @@ hex = "0.4.3"
 hex-literal = "1.0.0"
 reth-cli = { git = "https://github.com/paradigmxyz/reth", rev = "ab2b11f40eed3623219c49022061a11a0b5e2c0c" }
 reth-cli-util = { git = "https://github.com/paradigmxyz/reth", rev = "ab2b11f40eed3623219c49022061a11a0b5e2c0c" }
+reth-dns-discovery = { git = "https://github.com/paradigmxyz/reth", rev = "ab2b11f40eed3623219c49022061a11a0b5e2c0c" }
 reth-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "ab2b11f40eed3623219c49022061a11a0b5e2c0c", features = ["full", "cli"] }
+reth-network = { git = "https://github.com/paradigmxyz/reth", rev = "ab2b11f40eed3623219c49022061a11a0b5e2c0c" }
 reth-network-peers = { git = "https://github.com/paradigmxyz/reth", rev = "ab2b11f40eed3623219c49022061a11a0b5e2c0c" }
+reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "ab2b11f40eed3623219c49022061a11a0b5e2c0c" }
+reth-node-builder = { git = "https://github.com/paradigmxyz/reth", rev = "ab2b11f40eed3623219c49022061a11a0b5e2c0c" }
+reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", rev = "ab2b11f40eed3623219c49022061a11a0b5e2c0c" }
+reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "ab2b11f40eed3623219c49022061a11a0b5e2c0c" }
 sha2 = "0.10.9"
 thiserror = "2.0.17"
+tracing = "0.1.41"
 
 pulsechain-chainspec = { path = "crates/pulsechain/chainspec" }
 pulsechain-consensus = { path = "crates/pulsechain/consensus" }

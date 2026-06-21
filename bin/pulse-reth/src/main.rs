@@ -6,7 +6,7 @@
 //! not provide explicit peers.
 
 use clap::Parser;
-use pulsechain_chainspec::{PULSECHAIN_BOOTNODES, PULSECHAIN_TESTNET_V4_BOOTNODES};
+use pulsechain_chainspec::{PulseNetworkBuilder, apply_default_pulsechain_bootnodes};
 use pulsechain_evm::sacrifice::MAINNET_ALLOCATION;
 use pulsechain_hardforks::{PULSECHAIN_MAINNET_CHAIN_ID, PULSECHAIN_TESTNET_V4_CHAIN_ID};
 use pulsechain_node::{PulseChainSpecParser, PulseConsensusBuilder, PulseExecutorBuilder};
@@ -14,7 +14,6 @@ use reth_ethereum::{
     cli::interface::{Cli, Commands},
     node::{EthereumNode, node::EthereumAddOns},
 };
-use reth_network_peers::TrustedPeer;
 
 const GO_PULSE_RPC_TX_FEE_CAP_WEI: u128 = 1_000_000_000_000_000_000_000_000;
 
@@ -31,6 +30,7 @@ fn main() {
 
     let mut cli = Cli::<PulseChainSpecParser>::parse();
     apply_default_pulsechain_bootnodes(&mut cli);
+
     apply_default_go_pulse_rpc_tx_fee_cap(&mut cli, rpc_tx_fee_cap_was_set(std::env::args_os()));
 
     cli.run(|builder, _| async move {
@@ -38,6 +38,7 @@ fn main() {
             .with_types::<EthereumNode>()
             .with_components(
                 EthereumNode::components()
+                    .network(PulseNetworkBuilder)
                     .executor(PulseExecutorBuilder::default())
                     .consensus(PulseConsensusBuilder::default()),
             )
@@ -48,33 +49,6 @@ fn main() {
         handle.wait_for_node_exit().await
     })
     .unwrap();
-}
-
-fn apply_default_pulsechain_bootnodes(cli: &mut Cli<PulseChainSpecParser>) {
-    let Commands::Node(command) = &mut cli.command else {
-        return;
-    };
-
-    if command.network.bootnodes.is_some() {
-        return;
-    }
-
-    let bootnodes = match command.chain.chain.id() {
-        PULSECHAIN_MAINNET_CHAIN_ID => PULSECHAIN_BOOTNODES,
-        PULSECHAIN_TESTNET_V4_CHAIN_ID => PULSECHAIN_TESTNET_V4_BOOTNODES,
-        _ => return,
-    };
-
-    command.network.bootnodes = Some(
-        bootnodes
-            .iter()
-            .map(|bootnode| {
-                bootnode
-                    .parse::<TrustedPeer>()
-                    .expect("embedded PulseChain bootnode must parse as an enode URL")
-            })
-            .collect(),
-    );
 }
 
 fn apply_default_go_pulse_rpc_tx_fee_cap(
@@ -130,56 +104,6 @@ mod tests {
         assert!(help.contains("pulsechain, pulsechain-testnet-v4, mainnet, dev"));
         assert!(!help.contains("pulsechain, pulse,"));
         assert!(!help.contains("pulsechain-devnet"));
-    }
-
-    #[test]
-    fn injects_mainnet_bootnodes_by_default() {
-        let mut cli = parse_node_cli(["pulse-reth", "node", "--chain", "pulsechain"]);
-
-        apply_default_pulsechain_bootnodes(&mut cli);
-
-        let Commands::Node(command) = cli.command else {
-            panic!("expected node command");
-        };
-        assert_eq!(
-            command.network.bootnodes.unwrap().len(),
-            PULSECHAIN_BOOTNODES.len()
-        );
-    }
-
-    #[test]
-    fn injects_testnet_v4_bootnodes_by_default() {
-        let mut cli = parse_node_cli(["pulse-reth", "node", "--chain", "pulsechain-testnet-v4"]);
-
-        apply_default_pulsechain_bootnodes(&mut cli);
-
-        let Commands::Node(command) = cli.command else {
-            panic!("expected node command");
-        };
-        assert_eq!(
-            command.network.bootnodes.unwrap().len(),
-            PULSECHAIN_TESTNET_V4_BOOTNODES.len()
-        );
-    }
-
-    #[test]
-    fn user_bootnodes_are_not_overwritten() {
-        let explicit_bootnode = PULSECHAIN_BOOTNODES[0];
-        let mut cli = parse_node_cli([
-            "pulse-reth",
-            "node",
-            "--chain",
-            "pulsechain",
-            "--bootnodes",
-            explicit_bootnode,
-        ]);
-
-        apply_default_pulsechain_bootnodes(&mut cli);
-
-        let Commands::Node(command) = cli.command else {
-            panic!("expected node command");
-        };
-        assert_eq!(command.network.bootnodes.unwrap().len(), 1);
     }
 
     #[test]

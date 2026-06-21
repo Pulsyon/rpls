@@ -33,11 +33,12 @@ Reth pin: `ab2b11f40eed3623219c49022061a11a0b5e2c0c`.
 ## Current Rust State
 
 - `crates/pulsechain/hardforks` implements verified phase, transaction chain ID, Shanghai, TTD, compatibility, and fork predicates for mainnet and testnet-v4.
-- `crates/pulsechain/chainspec` captures verified mainnet/testnet-v4 constants, inherited Ethereum fork schedule, genesis hash compatibility, optional treasury config, and bootnodes.
+- `crates/pulsechain/chainspec` captures verified mainnet/testnet-v4 constants, inherited Ethereum fork schedule, genesis hash compatibility, optional treasury config, bootnodes, Pulse DNS discovery URLs, and Reth network bootstrap adapters.
 - `crates/pulsechain/evm` embeds and validates the official mainnet and testnet-v4 sacrifice allocation artifacts and deposit contract artifacts.
 - `crates/pulsechain/consensus` encodes the PrimordialPulse difficulty, terminal PoW, and POS-to-POW transition helper rules.
 - `crates/pulsechain/node` wraps Reth EVM configuration, applies the PrimordialPulse state mutation at the configured fork block, overrides the EVM transaction chain ID to Ethereum mainnet before PrimordialPulse and PulseChain at/after the fork, and installs a Pulse consensus wrapper over Reth's `EthBeaconConsensus`.
 - `crates/pulsechain/rpc` contains Pulse mainnet and testnet-v4 identity helpers.
+- `bin/pulse-reth` wires the chainspec bootnode and DNS discovery adapters into Reth before networking starts.
 
 ## Required Next Hooks
 

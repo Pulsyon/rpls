@@ -14,8 +14,8 @@ cargo run -p pulse-reth
 
 ## Workspace
 
-- `bin/pulse-reth`: Reth CLI entry point with Pulse chain parsing, executor/consensus installation, artifact validation, and default bootnode injection.
-- `crates/pulsechain/chainspec`: Pulse mainnet/testnet-v4 constants, Ethereum historical forks, genesis hash, optional treasury config, and bootnodes.
+- `bin/pulse-reth`: Reth CLI entry point with Pulse chain parsing, executor/consensus installation, artifact validation, default bootnode injection, and Pulse DNS discovery bootstrap.
+- `crates/pulsechain/chainspec`: Pulse mainnet/testnet-v4 constants, Ethereum historical forks, genesis hash, optional treasury config, bootnodes, and Pulse DNS discovery URLs.
 - `crates/pulsechain/hardforks`: PrimordialPulse phase, transaction chain ID transition, Shanghai timing, and compatibility predicates.
 - `crates/pulsechain/consensus`: Pulse difficulty, TTD, and header-transition helper rules.
 - `crates/pulsechain/evm`: sacrifice allocation parser, embedded allocation artifacts, and deposit contract artifacts.

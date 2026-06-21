@@ -1,7 +1,7 @@
 //! PulseChain consensus rule helpers.
 //!
 //! This crate contains the go-pulse-specific consensus predicates that can be
-//! tested independently from Reth integration: PrimordialPulse difficulty,
+//! tested independently from node integration: PrimordialPulse difficulty,
 //! terminal PoW detection, and the otherwise-invalid post-merge POS-to-POW
 //! transition that is allowed exactly at PrimordialPulse.
 

@@ -2,7 +2,7 @@
 
 Source of truth: local `go-pulse-repo` at commit `a224d91967a31c2c3080a8f75784d8de13c80b7b`.
 
-Reth pin: `ab2b11f40eed3623219c49022061a11a0b5e2c0c`.
+Upstream execution pin: `ab2b11f40eed3623219c49022061a11a0b5e2c0c`.
 
 ## Verified Rules
 
@@ -33,15 +33,15 @@ Reth pin: `ab2b11f40eed3623219c49022061a11a0b5e2c0c`.
 ## Current Rust State
 
 - `crates/pulsechain/hardforks` implements verified phase, transaction chain ID, Shanghai, TTD, compatibility, and fork predicates for mainnet and testnet-v4.
-- `crates/pulsechain/chainspec` captures verified mainnet/testnet-v4 constants, inherited Ethereum fork schedule, genesis hash compatibility, optional treasury config, bootnodes, Pulse DNS discovery URLs, and Reth network bootstrap adapters.
+- `crates/pulsechain/chainspec` captures verified mainnet/testnet-v4 constants, inherited Ethereum fork schedule, genesis hash compatibility, optional treasury config, bootnodes, Pulse DNS discovery URLs, and rpls network bootstrap adapters.
 - `crates/pulsechain/evm` embeds and validates the official mainnet and testnet-v4 sacrifice allocation artifacts and deposit contract artifacts.
 - `crates/pulsechain/consensus` encodes the PrimordialPulse difficulty, terminal PoW, and POS-to-POW transition helper rules.
-- `crates/pulsechain/node` wraps Reth EVM configuration, applies the PrimordialPulse state mutation at the configured fork block, overrides the EVM transaction chain ID to Ethereum mainnet before PrimordialPulse and PulseChain at/after the fork, and installs a Pulse consensus wrapper over Reth's `EthBeaconConsensus`.
+- `crates/pulsechain/node` wraps the upstream EVM configuration, applies the PrimordialPulse state mutation at the configured fork block, overrides the EVM transaction chain ID to Ethereum mainnet before PrimordialPulse and PulseChain at/after the fork, and installs a Pulse consensus wrapper over the upstream beacon consensus.
 - `crates/pulsechain/rpc` contains Pulse mainnet and testnet-v4 identity helpers.
-- `bin/pulse-reth` wires the chainspec bootnode and DNS discovery adapters into Reth before networking starts.
+- `bin/rpls` wires the chainspec bootnode and DNS discovery adapters into rpls before networking starts, and defaults node storage to the OS app-data directory named `rpls`.
 
 ## Required Next Hooks
 
-1. Confirm whether Reth's network/fork-id calculation from the Pulse `ChainSpec` matches go-pulse peers. If not, customize the network/fork-id hook.
+1. Confirm whether the network/fork-id calculation from the Pulse `ChainSpec` matches go-pulse peers. If not, customize the network/fork-id hook.
 2. Build golden fixtures from `go-pulse` for blocks `17_232_999`, `17_233_000`, `17_233_001`, and at least 100 post-fork blocks, then compare headers, state roots, receipt roots, and transaction recovery.
 3. Add trace/debug compatibility fixtures once block import parity is proven.

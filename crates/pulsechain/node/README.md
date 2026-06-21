@@ -1,18 +1,18 @@
 # pulsechain-node
 
-Reth node integration for PulseChain.
+rpls node integration for PulseChain.
 
 ## Done
 
 - Provides `PulseChainSpecParser` for `pulsechain`, `pulsechain-testnet-v4`, hidden `pulsechain-devnet`, and delegated Ethereum chains.
-- Builds Reth `ChainSpec` values from Pulse mainnet and testnet-v4 metadata.
-- Installs `PulseExecutorBuilder`, wrapping Reth's Ethereum EVM configuration.
+- Builds `ChainSpec` values from Pulse mainnet and testnet-v4 metadata.
+- Installs `PulseExecutorBuilder`, wrapping the upstream Ethereum EVM configuration.
 - Overrides EVM transaction chain ID to Ethereum mainnet before PrimordialPulse and PulseChain at/after PrimordialPulse.
 - Applies PrimordialPulse state mutation exactly at the configured fork block.
 - Applies sacrifice credits, testnet-v4 treasury credit, and deposit contract replacement.
-- Installs `PulseBeaconConsensus`, wrapping Reth's `EthBeaconConsensus`.
+- Installs `PulseBeaconConsensus`, wrapping the upstream beacon consensus.
 - Allows the otherwise-invalid POS-to-POW header transition at PrimordialPulse and rejects it outside the fork block.
-- Delegates normal body, pre-execution, post-execution, and POS header checks to Reth validation helpers.
+- Delegates normal body, pre-execution, post-execution, and POS header checks to upstream validation helpers.
 
 ## Not Complete
 

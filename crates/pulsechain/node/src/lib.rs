@@ -1,12 +1,13 @@
-//! PulseChain Reth node integration.
+//! PulseChain rpls node integration.
 //!
-//! This crate adapts Reth's Ethereum node stack for PulseChain by supplying
+//! This crate adapts the upstream Ethereum node stack for PulseChain by supplying
 //! chain parsing, PulseChain chain specs, EVM environment overrides, and the
 //! PrimordialPulse block executor state mutation.
 
 use std::sync::Arc;
 
 use alloy_consensus::{EMPTY_OMMER_ROOT_HASH, Transaction};
+use alloy_genesis::EthashConfig;
 use pulsechain_chainspec::{
     PULSECHAIN_MAINNET, PULSECHAIN_TESTNET_V4, PulseChainSpec, TreasuryCredit,
     pulsechain_spec_for_chain_id,
@@ -56,7 +57,7 @@ use reth_ethereum::{
             Database as _, DatabaseCommit,
             context::{CfgEnv, TxEnv, result::ResultAndState},
             db::State,
-            primitives::{Address, U256, hardfork::SpecId},
+            primitives::{Address, B256, U256, hardfork::SpecId},
             state::{Account, Bytecode, EvmState, EvmStorage, EvmStorageSlot},
         },
     },
@@ -120,29 +121,76 @@ impl ChainSpecParser for PulseChainSpecParser {
 
     fn parse(chain: &str) -> eyre::Result<Arc<ChainSpec>> {
         match chain {
-            "pulsechain" => Ok(pulsechain_reth_chainspec()),
+            "pulsechain" => Ok(pulsechain_rpls_chainspec()),
             "pulsechain-testnet-v4" | "pulsechain-devnet" => {
-                Ok(pulsechain_testnet_v4_reth_chainspec())
+                Ok(pulsechain_testnet_v4_rpls_chainspec())
             }
             other => EthereumChainSpecParser::parse(other),
         }
     }
 }
 
-pub fn pulsechain_reth_chainspec() -> Arc<ChainSpec> {
-    pulsechain_reth_chainspec_from(PULSECHAIN_MAINNET)
+pub fn pulsechain_rpls_chainspec() -> Arc<ChainSpec> {
+    pulsechain_rpls_chainspec_from(PULSECHAIN_MAINNET)
 }
 
-pub fn pulsechain_testnet_v4_reth_chainspec() -> Arc<ChainSpec> {
-    pulsechain_reth_chainspec_from(PULSECHAIN_TESTNET_V4)
+pub fn pulsechain_testnet_v4_rpls_chainspec() -> Arc<ChainSpec> {
+    pulsechain_rpls_chainspec_from(PULSECHAIN_TESTNET_V4)
 }
 
-fn pulsechain_reth_chainspec_from(pulse_spec: PulseChainSpec) -> Arc<ChainSpec> {
+fn pulsechain_rpls_chainspec_from(pulse_spec: PulseChainSpec) -> Arc<ChainSpec> {
     let mut spec = (**MAINNET).clone();
+    let genesis = &mut spec.genesis;
+
+    genesis.nonce = 0x42;
+    genesis.timestamp = 0;
+    genesis.extra_data = "0x11bbe8db4e347b4e8c937c1c8370e4b5ed33adb3db69cbdb7a38e1e50b1b82fa"
+        .parse()
+        .expect("go-pulse genesis extra data is valid bytes");
+    genesis.gas_limit = 5_000;
+    genesis.difficulty = U256::from(17_179_869_184u64);
+    genesis.mix_hash = B256::ZERO;
+    genesis.coinbase = Address::ZERO;
+    genesis.base_fee_per_gas = None;
+    genesis.excess_blob_gas = None;
+    genesis.blob_gas_used = None;
+    genesis.number = None;
+
+    genesis.config.chain_id = pulse_spec.chain_id;
+    genesis.config.homestead_block = Some(1_150_000);
+    genesis.config.dao_fork_block = Some(1_920_000);
+    genesis.config.dao_fork_support = true;
+    genesis.config.eip150_block = Some(2_463_000);
+    genesis.config.eip155_block = Some(2_675_000);
+    genesis.config.eip158_block = Some(2_675_000);
+    genesis.config.byzantium_block = Some(4_370_000);
+    genesis.config.constantinople_block = Some(7_280_000);
+    genesis.config.petersburg_block = Some(7_280_000);
+    genesis.config.istanbul_block = Some(9_069_000);
+    genesis.config.muir_glacier_block = Some(9_200_000);
+    genesis.config.berlin_block = Some(12_244_000);
+    genesis.config.london_block = Some(12_965_000);
+    genesis.config.arrow_glacier_block = Some(13_773_000);
+    genesis.config.gray_glacier_block = Some(15_050_000);
+    genesis.config.merge_netsplit_block = None;
+    genesis.config.shanghai_time = Some(pulse_spec.shanghai_timestamp);
+    genesis.config.cancun_time = None;
+    genesis.config.prague_time = None;
+    genesis.config.osaka_time = None;
+    genesis.config.bpo1_time = None;
+    genesis.config.bpo2_time = None;
+    genesis.config.bpo3_time = None;
+    genesis.config.bpo4_time = None;
+    genesis.config.bpo5_time = None;
+    genesis.config.deposit_contract_address = None;
+    genesis.config.terminal_total_difficulty = Some(pulse_spec.terminal_total_difficulty);
+    genesis.config.terminal_total_difficulty_passed = false;
+    genesis.config.ethash = Some(EthashConfig {});
+    genesis.config.clique = None;
+    genesis.config.parlia = None;
+
     spec.chain = Chain::from(pulse_spec.chain_id);
-    spec.genesis.config.chain_id = pulse_spec.chain_id;
-    spec.genesis.config.shanghai_time = Some(pulse_spec.shanghai_timestamp);
-    spec.genesis.config.terminal_total_difficulty = Some(pulse_spec.terminal_total_difficulty);
+    spec.deposit_contract = None;
     spec.paris_block_and_final_difficulty = Some((
         pulse_spec.primordial_pulse_block,
         pulse_spec.terminal_total_difficulty,
@@ -159,10 +207,23 @@ fn pulsechain_reth_chainspec_from(pulse_spec: PulseChainSpec) -> Arc<ChainSpec> 
         EthereumHardfork::Shanghai,
         ForkCondition::Timestamp(pulse_spec.shanghai_timestamp),
     );
+    for fork in [
+        EthereumHardfork::Cancun,
+        EthereumHardfork::Prague,
+        EthereumHardfork::Osaka,
+        EthereumHardfork::Bpo1,
+        EthereumHardfork::Bpo2,
+        EthereumHardfork::Bpo3,
+        EthereumHardfork::Bpo4,
+        EthereumHardfork::Bpo5,
+    ] {
+        spec.hardforks.remove(fork);
+    }
+    spec.blob_params.scheduled.clear();
     Arc::new(spec)
 }
 
-/// PulseChain consensus wrapper over Reth's Ethereum beacon consensus.
+/// PulseChain consensus wrapper over the upstream Ethereum beacon consensus.
 ///
 /// go-pulse keeps Ethereum beacon validation for normal post-Paris blocks, but
 /// allows the PrimordialPulse block itself to cross from a zero-difficulty POS
@@ -1129,8 +1190,41 @@ mod tests {
     }
 
     #[test]
+    fn pulse_chainspec_does_not_inherit_ethereum_post_shanghai_forks() {
+        let spec = pulsechain_rpls_chainspec();
+        let timestamp_after_ethereum_osaka = 1_782_000_000;
+
+        for fork in [
+            EthereumHardfork::Cancun,
+            EthereumHardfork::Prague,
+            EthereumHardfork::Osaka,
+            EthereumHardfork::Bpo1,
+            EthereumHardfork::Bpo2,
+            EthereumHardfork::Bpo3,
+            EthereumHardfork::Bpo4,
+            EthereumHardfork::Bpo5,
+        ] {
+            assert_eq!(spec.ethereum_fork_activation(fork), ForkCondition::Never);
+            assert!(
+                !spec.is_ethereum_fork_active_at_timestamp(fork, timestamp_after_ethereum_osaka)
+            );
+        }
+
+        assert!(!spec.is_cancun_active_at_timestamp(timestamp_after_ethereum_osaka));
+        assert!(!spec.is_prague_active_at_timestamp(timestamp_after_ethereum_osaka));
+        assert!(!spec.is_osaka_active_at_timestamp(timestamp_after_ethereum_osaka));
+        assert_eq!(
+            spec.blob_params_at_timestamp(timestamp_after_ethereum_osaka),
+            None
+        );
+        assert_eq!(spec.genesis.config.cancun_time, None);
+        assert_eq!(spec.genesis.config.prague_time, None);
+        assert_eq!(spec.genesis.config.osaka_time, None);
+    }
+
+    #[test]
     fn pulse_consensus_allows_primordial_pulse_pos_to_pow_header() {
-        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let consensus = PulseBeaconConsensus::new(pulsechain_rpls_chainspec());
         let parent_hash = B256::repeat_byte(0x11);
         let parent = SealedHeader::new(
             pulse_transition_header(
@@ -1159,7 +1253,7 @@ mod tests {
 
     #[test]
     fn pulse_consensus_rejects_invalid_parent_dependent_pow_difficulty() {
-        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let consensus = PulseBeaconConsensus::new(pulsechain_rpls_chainspec());
         let parent_hash = B256::repeat_byte(0x23);
         let parent_header = pulse_transition_header(
             15_050_000 - 1,
@@ -1190,7 +1284,7 @@ mod tests {
 
     #[test]
     fn pulse_consensus_rejects_late_pos_to_pow_header() {
-        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let consensus = PulseBeaconConsensus::new(pulsechain_rpls_chainspec());
         let parent_hash = B256::repeat_byte(0x33);
         let parent = SealedHeader::new(
             pulse_transition_header(
@@ -1223,7 +1317,7 @@ mod tests {
 
     #[test]
     fn pulse_consensus_rejects_wrong_primordial_pulse_pow_difficulty() {
-        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let consensus = PulseBeaconConsensus::new(pulsechain_rpls_chainspec());
         let header = SealedHeader::new(
             pulse_transition_header(
                 PULSECHAIN_MAINNET.primordial_pulse_block,
@@ -1242,7 +1336,7 @@ mod tests {
 
     #[test]
     fn pulse_consensus_rejects_shanghai_active_primordial_pulse_pow_header() {
-        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let consensus = PulseBeaconConsensus::new(pulsechain_rpls_chainspec());
         let header = SealedHeader::new(
             pulse_transition_header(
                 PULSECHAIN_MAINNET.primordial_pulse_block,
@@ -1261,7 +1355,7 @@ mod tests {
 
     #[test]
     fn pulse_consensus_rejects_withdrawals_root_on_primordial_pulse_pow_header() {
-        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let consensus = PulseBeaconConsensus::new(pulsechain_rpls_chainspec());
         let mut header = pulse_transition_header(
             PULSECHAIN_MAINNET.primordial_pulse_block,
             PULSECHAIN_MAINNET.shanghai_timestamp - 12,
@@ -1278,7 +1372,7 @@ mod tests {
 
     #[test]
     fn pulse_consensus_uses_go_pulse_shanghai_rule_for_header_withdrawals() {
-        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let consensus = PulseBeaconConsensus::new(pulsechain_rpls_chainspec());
         let mut header = pulse_transition_header(
             PULSECHAIN_MAINNET.primordial_pulse_block - 1,
             ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP,
@@ -1311,7 +1405,7 @@ mod tests {
 
     #[test]
     fn pulse_consensus_treats_zero_difficulty_headers_as_pos_before_primordial_pulse() {
-        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let consensus = PulseBeaconConsensus::new(pulsechain_rpls_chainspec());
         let mut header = pulse_transition_header(
             PULSECHAIN_MAINNET.primordial_pulse_block - 1,
             ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP,
@@ -1328,20 +1422,25 @@ mod tests {
     }
 
     #[test]
-    fn pulse_reth_chainspec_uses_pulse_identity() {
-        let spec = pulsechain_reth_chainspec();
+    fn pulse_rpls_chainspec_uses_pulse_identity() {
+        let spec = pulsechain_rpls_chainspec();
         assert_eq!(spec.chain.id(), PULSECHAIN_MAINNET.chain_id);
         assert_eq!(spec.genesis.config.chain_id, PULSECHAIN_MAINNET.chain_id);
         assert_eq!(
             spec.genesis.config.shanghai_time,
             Some(PULSECHAIN_MAINNET.shanghai_timestamp)
         );
+        assert_eq!(spec.genesis.nonce, 66);
+        assert_eq!(spec.genesis.gas_limit, 5_000);
+        assert_eq!(spec.genesis.config.deposit_contract_address, None);
+        assert!(spec.genesis.config.ethash.is_some());
+        assert_eq!(spec.deposit_contract(), None);
         assert_eq!(spec.genesis_hash(), PULSECHAIN_MAINNET.genesis_hash);
     }
 
     #[test]
-    fn pulse_reth_testnet_v4_chainspec_uses_go_pulse_identity() {
-        let spec = pulsechain_testnet_v4_reth_chainspec();
+    fn pulse_rpls_testnet_v4_chainspec_uses_go_pulse_identity() {
+        let spec = pulsechain_testnet_v4_rpls_chainspec();
         assert_eq!(spec.chain.id(), PULSECHAIN_TESTNET_V4.chain_id);
         assert_eq!(spec.genesis.config.chain_id, PULSECHAIN_TESTNET_V4.chain_id);
         assert_eq!(
@@ -1370,8 +1469,8 @@ mod tests {
 
     #[test]
     fn executor_trigger_is_pulse_only_and_exact_block() {
-        let pulse_mainnet = pulsechain_reth_chainspec();
-        let pulse_testnet = pulsechain_testnet_v4_reth_chainspec();
+        let pulse_mainnet = pulsechain_rpls_chainspec();
+        let pulse_testnet = pulsechain_testnet_v4_rpls_chainspec();
         let ethereum_mainnet = PulseChainSpecParser::parse("mainnet").unwrap();
         let dev = PulseChainSpecParser::parse("dev").unwrap();
 
@@ -1411,7 +1510,7 @@ mod tests {
     #[test]
     fn evm_env_uses_ethereum_chain_id_before_pulse_and_pulse_chain_id_at_fork() {
         let config = PulseEvmConfig {
-            inner: EthEvmConfig::new(pulsechain_reth_chainspec()),
+            inner: EthEvmConfig::new(pulsechain_rpls_chainspec()),
         };
 
         let mut header = Header {
@@ -1432,7 +1531,7 @@ mod tests {
     #[test]
     fn evm_env_uses_go_pulse_shanghai_rule_around_primordial_pulse() {
         let config = PulseEvmConfig {
-            inner: EthEvmConfig::new(pulsechain_reth_chainspec()),
+            inner: EthEvmConfig::new(pulsechain_rpls_chainspec()),
         };
 
         let mut header = Header {
@@ -1465,7 +1564,7 @@ mod tests {
     #[test]
     fn testnet_v4_evm_env_uses_ethereum_chain_id_before_pulse_and_testnet_chain_id_at_fork() {
         let config = PulseEvmConfig {
-            inner: EthEvmConfig::new(pulsechain_testnet_v4_reth_chainspec()),
+            inner: EthEvmConfig::new(pulsechain_testnet_v4_rpls_chainspec()),
         };
 
         let mut header = Header {

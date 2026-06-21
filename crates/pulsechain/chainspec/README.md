@@ -14,9 +14,9 @@ PulseChain chain metadata and static network constants.
 
 ## Not Here
 
-- Reth `ChainSpec` construction is done in `crates/pulsechain/node`.
+- `ChainSpec` construction is done in `crates/pulsechain/node`.
 - Fork predicates and transaction chain ID transition rules live in `crates/pulsechain/hardforks`.
-- Bootnode and DNS discovery injection are done by `bin/pulse-reth`.
+- Bootnode and DNS discovery injection are done by `bin/rpls`.
 
 ## Verification
 

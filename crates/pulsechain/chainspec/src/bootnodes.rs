@@ -129,7 +129,7 @@ where
 
         let network = NetworkManager::builder(network_config).await?;
         let handle = ctx.start_network(network, pool);
-        info!(target: "reth::cli", enode=%handle.local_node_record(), "P2P networking initialized");
+        info!(target: "rpls::cli", enode=%handle.local_node_record(), "P2P networking initialized");
         Ok(handle)
     }
 }

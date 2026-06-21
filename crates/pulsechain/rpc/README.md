@@ -6,11 +6,11 @@ PulseChain RPC identity helpers.
 
 - Provides PulseChain mainnet network identity values.
 - Provides PulseChain testnet-v4 network identity values.
-- Keeps RPC identity logic independent from Reth node wiring.
+- Keeps RPC identity logic independent from rpls node wiring.
 
 ## Not Here
 
-- Reth RPC module installation is not customized in this crate.
+- RPC module installation is not customized in this crate.
 - Trace/debug compatibility behavior is not validated yet.
 - Network fork ID and peer handshake logic are not handled here.
 

@@ -1,6 +1,6 @@
 //! PulseChain RPC identity helpers.
 //!
-//! The binary still uses Reth's RPC server, but these helpers capture the
+//! The binary still uses the upstream RPC server, but these helpers capture the
 //! PulseChain network identities expected by `eth_chainId` and `net_version`
 //! for tests and future RPC customization.
 

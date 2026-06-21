@@ -1,16 +1,17 @@
-# pulse-reth
+# rpls
 
-Reth CLI entry point for running the PulseChain execution client.
+rpls CLI entry point for running the PulseChain execution client.
 
 ## Done
 
-- Uses Reth's `Cli` with `PulseChainSpecParser`, so visible built-in chains are `pulsechain`, `pulsechain-testnet-v4`, `mainnet`, and `dev`.
+- Uses the upstream `Cli` with `PulseChainSpecParser`, so visible built-in chains are `pulsechain`, `pulsechain-testnet-v4`, `mainnet`, and `dev`.
 - Accepts `pulsechain-devnet` as an unlisted compatibility alias for testnet-v4.
 - Installs the Pulse executor and Pulse consensus builder into `EthereumNode::components()`.
 - Validates the embedded mainnet sacrifice allocation at startup.
 - Injects go-pulse default bootnodes for PulseChain mainnet and testnet-v4 when the user did not provide explicit bootnodes.
 - Injects go-pulse Pulse DNS discovery trees for PulseChain mainnet and testnet-v4 when DNS discovery is enabled.
 - Applies go-pulse's `--rpc.txfeecap` default of `1000000` ether for PulseChain mainnet and testnet-v4 when the user did not provide an explicit cap.
+- Uses an `rpls` OS app-data directory for default node storage when the user did not provide `--datadir`.
 - Preserves user-provided bootnodes.
 
 ## Not Here

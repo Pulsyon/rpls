@@ -14,7 +14,7 @@ Pure PulseChain fork constants and fork-selection predicates.
 
 ## Not Here
 
-- These helpers do not depend on Reth and do not validate headers directly.
+- These helpers do not depend on the node stack and do not validate headers directly.
 - Consensus integration lives in `crates/pulsechain/node`.
 - EVM state changes live in `crates/pulsechain/evm` and `crates/pulsechain/node`.
 

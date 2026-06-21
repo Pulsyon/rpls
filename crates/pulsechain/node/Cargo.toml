@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+alloy-consensus.workspace = true
 pulsechain-chainspec.workspace = true
 pulsechain-consensus.workspace = true
 pulsechain-evm.workspace = true

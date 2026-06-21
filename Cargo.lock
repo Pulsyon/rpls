@@ -5425,6 +5425,7 @@ dependencies = [
 name = "pulsechain-node"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "eyre",
  "pulsechain-chainspec",
  "pulsechain-consensus",

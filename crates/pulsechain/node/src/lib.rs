@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use alloy_consensus::{EMPTY_OMMER_ROOT_HASH, Transaction};
 use pulsechain_chainspec::{
     PULSECHAIN_MAINNET, PULSECHAIN_TESTNET_V4, PulseChainSpec, TreasuryCredit,
     pulsechain_spec_for_chain_id,
@@ -20,7 +21,8 @@ use pulsechain_evm::{
 };
 use pulsechain_hardforks::{
     PRIMORDIAL_PULSE_BLOCK, PULSECHAIN_MAINNET_CHAIN_ID, PULSECHAIN_TESTNET_V4_CHAIN_ID,
-    PULSECHAIN_TESTNET_V4_PRIMORDIAL_PULSE_BLOCK, PULSECHAIN_TTD_OFFSET, transaction_chain_id_at,
+    PULSECHAIN_TESTNET_V4_PRIMORDIAL_PULSE_BLOCK, PULSECHAIN_TTD_OFFSET, is_shanghai_active_at,
+    transaction_chain_id_at,
 };
 use reth_cli::chainspec::ChainSpecParser;
 use reth_ethereum::{
@@ -31,13 +33,13 @@ use reth_ethereum::{
     cli::chainspec::EthereumChainSpecParser,
     consensus::{
         Consensus, ConsensusError, EthBeaconConsensus, FullConsensus, HeaderValidator,
-        validate_block_post_execution,
+        TxGasLimitTooHighErr, validate_block_post_execution,
         validation::{
-            validate_against_parent_4844, validate_against_parent_eip1559_base_fee,
-            validate_against_parent_gas_limit, validate_against_parent_hash_number,
-            validate_against_parent_timestamp, validate_block_pre_execution,
-            validate_body_against_header, validate_header_base_fee, validate_header_extra_data,
-            validate_header_gas,
+            MAX_RLP_BLOCK_SIZE, validate_4844_header_standalone, validate_against_parent_4844,
+            validate_against_parent_eip1559_base_fee, validate_against_parent_gas_limit,
+            validate_against_parent_hash_number, validate_against_parent_timestamp,
+            validate_body_against_header, validate_cancun_gas, validate_header_base_fee,
+            validate_header_extra_data, validate_header_gas, validate_shanghai_withdrawals,
         },
     },
     evm::{
@@ -52,7 +54,7 @@ use reth_ethereum::{
         },
         revm::{
             Database as _, DatabaseCommit,
-            context::{TxEnv, result::ResultAndState},
+            context::{CfgEnv, TxEnv, result::ResultAndState},
             db::State,
             primitives::{Address, U256, hardfork::SpecId},
             state::{Account, Bytecode, EvmState, EvmStorage, EvmStorageSlot},
@@ -66,8 +68,9 @@ use reth_ethereum::{
         },
     },
     primitives::{
-        Block as BlockTrait, BlockHeader, Header, NodePrimitives, RecoveredBlock, SealedBlock,
-        SealedHeader,
+        AlloyBlockHeader, Block as BlockTrait, BlockBody, BlockHeader, GotExpected, Header,
+        NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
+        constants::MAX_TX_GAS_LIMIT_OSAKA, transaction::TxHashRef,
     },
     provider::BlockExecutionResult,
     rpc::types::engine::ExecutionData,
@@ -216,7 +219,7 @@ where
     }
 
     fn validate_block_pre_execution(&self, block: &SealedBlock<B>) -> Result<(), Self::Error> {
-        validate_block_pre_execution(block, self.inner.chain_spec())
+        validate_pulse_block_pre_execution(block, self.inner.chain_spec())
     }
 }
 
@@ -230,7 +233,7 @@ where
             return self.validate_primordial_pulse_pow_header(header.header());
         }
 
-        self.inner.validate_header(header)
+        self.validate_header_standalone(header.header())
     }
 
     fn validate_header_against_parent(
@@ -271,6 +274,71 @@ impl<ChainSpec> PulseBeaconConsensus<ChainSpec>
 where
     ChainSpec: EthChainSpec + EthereumHardforks,
 {
+    fn validate_header_standalone<H: BlockHeader>(&self, header: &H) -> Result<(), ConsensusError>
+    where
+        ChainSpec: EthChainSpec<Header = H>,
+    {
+        let chain_spec = self.inner.chain_spec();
+        let is_post_merge = chain_spec.is_paris_active_at_block(header.number());
+
+        if is_post_merge {
+            if !header.difficulty().is_zero() {
+                return Err(ConsensusError::TheMergeDifficultyIsNotZero);
+            }
+
+            if !header.nonce().is_some_and(|nonce| nonce.is_zero()) {
+                return Err(ConsensusError::TheMergeNonceIsNotZero);
+            }
+
+            if header.ommers_hash() != EMPTY_OMMER_ROOT_HASH {
+                return Err(ConsensusError::TheMergeOmmerRootIsNotEmpty);
+            }
+        } else {
+            let present_timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            if header.timestamp() > present_timestamp + ALLOWED_FUTURE_BLOCK_TIME_SECONDS {
+                return Err(ConsensusError::TimestampIsInFuture {
+                    timestamp: header.timestamp(),
+                    present_timestamp,
+                });
+            }
+        }
+
+        validate_header_extra_data(header)?;
+        validate_header_gas(header)?;
+        validate_header_base_fee(header, chain_spec)?;
+
+        let is_shanghai = pulse_shanghai_active_at(chain_spec, header.number(), header.timestamp());
+        if is_shanghai && header.withdrawals_root().is_none() {
+            return Err(ConsensusError::WithdrawalsRootMissing);
+        } else if !is_shanghai && header.withdrawals_root().is_some() {
+            return Err(ConsensusError::WithdrawalsRootUnexpected);
+        }
+
+        if let Some(blob_params) = chain_spec.blob_params_at_timestamp(header.timestamp()) {
+            validate_4844_header_standalone(header, blob_params)?;
+        } else if header.blob_gas_used().is_some() {
+            return Err(ConsensusError::BlobGasUsedUnexpected);
+        } else if header.excess_blob_gas().is_some() {
+            return Err(ConsensusError::ExcessBlobGasUnexpected);
+        } else if header.parent_beacon_block_root().is_some() {
+            return Err(ConsensusError::ParentBeaconBlockRootUnexpected);
+        }
+
+        if chain_spec.is_prague_active_at_timestamp(header.timestamp()) {
+            if header.requests_hash().is_none() {
+                return Err(ConsensusError::RequestsHashMissing);
+            }
+        } else if header.requests_hash().is_some() {
+            return Err(ConsensusError::RequestsHashUnexpected);
+        }
+
+        Ok(())
+    }
+
     fn is_primordial_pulse_pow_header<H: BlockHeader>(&self, header: &H) -> bool {
         primordial_pulse_block_for_chain_id(self.inner.chain_spec().chain().id())
             == Some(header.number())
@@ -414,7 +482,7 @@ impl ConfigureEvm for PulseEvmConfig {
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv<SpecId>, Self::Error> {
         let mut env = self.inner.evm_env(header)?;
-        env.cfg_env.chain_id = self.transaction_chain_id(header.number);
+        self.apply_pulse_cfg_env(&mut env.cfg_env, header.number, header.timestamp);
         Ok(env)
     }
 
@@ -424,7 +492,11 @@ impl ConfigureEvm for PulseEvmConfig {
         attributes: &NextBlockEnvAttributes,
     ) -> Result<EvmEnv<SpecId>, Self::Error> {
         let mut env = self.inner.next_evm_env(parent, attributes)?;
-        env.cfg_env.chain_id = self.transaction_chain_id(parent.number.saturating_add(1));
+        self.apply_pulse_cfg_env(
+            &mut env.cfg_env,
+            parent.number.saturating_add(1),
+            attributes.timestamp,
+        );
         Ok(env)
     }
 
@@ -447,7 +519,11 @@ impl ConfigureEvm for PulseEvmConfig {
 impl ConfigureEngineEvm<ExecutionData> for PulseEvmConfig {
     fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<EvmEnvFor<Self>, Self::Error> {
         let mut env = self.inner.evm_env_for_payload(payload)?;
-        env.cfg_env.chain_id = self.transaction_chain_id(payload.payload.block_number());
+        self.apply_pulse_cfg_env(
+            &mut env.cfg_env,
+            payload.payload.block_number(),
+            payload.payload.timestamp(),
+        );
         Ok(env)
     }
 
@@ -467,16 +543,50 @@ impl ConfigureEngineEvm<ExecutionData> for PulseEvmConfig {
 }
 
 impl PulseEvmConfig {
+    fn apply_pulse_cfg_env(&self, cfg_env: &mut CfgEnv<SpecId>, block_number: u64, timestamp: u64) {
+        cfg_env.chain_id = self.transaction_chain_id(block_number);
+
+        let Some((primordial_pulse_block, shanghai_timestamp)) = self.pulse_hardfork_context()
+        else {
+            return;
+        };
+
+        if is_shanghai_active_at(
+            block_number,
+            timestamp,
+            primordial_pulse_block,
+            shanghai_timestamp,
+        ) && cfg_env.spec < SpecId::SHANGHAI
+        {
+            cfg_env.spec = SpecId::SHANGHAI;
+        }
+    }
+
     fn transaction_chain_id(&self, block_number: u64) -> u64 {
+        let chain_id = self.inner.chain_spec().chain().id();
+        let Some((primordial_pulse_block, _)) = self.pulse_hardfork_context() else {
+            return chain_id;
+        };
+
+        transaction_chain_id_at(block_number, primordial_pulse_block, chain_id)
+    }
+
+    fn pulse_hardfork_context(&self) -> Option<(u64, u64)> {
         let chain_id = self.inner.chain_spec().chain().id();
         let primordial_pulse_block = match chain_id {
             PULSECHAIN_MAINNET_CHAIN_ID | PULSECHAIN_TESTNET_V4_CHAIN_ID => {
                 self.inner.chain_spec().paris_block().unwrap_or(u64::MAX)
             }
-            _ => return chain_id,
+            _ => return None,
         };
+        let shanghai_timestamp = self
+            .inner
+            .chain_spec()
+            .ethereum_fork_activation(EthereumHardfork::Shanghai)
+            .as_timestamp()
+            .unwrap_or(u64::MAX);
 
-        transaction_chain_id_at(block_number, primordial_pulse_block, chain_id)
+        Some((primordial_pulse_block, shanghai_timestamp))
     }
 }
 
@@ -547,6 +657,47 @@ fn primordial_pulse_block_for_chain(chain_id: u64, chain_spec: &ChainSpec) -> Op
     }
 }
 
+fn pulse_hardfork_context<ChainSpec>(chain_spec: &ChainSpec) -> Option<(u64, u64)>
+where
+    ChainSpec: EthChainSpec + EthereumHardforks,
+{
+    match chain_spec.chain().id() {
+        PULSECHAIN_MAINNET_CHAIN_ID | PULSECHAIN_TESTNET_V4_CHAIN_ID => {}
+        _ => return None,
+    }
+
+    let primordial_pulse_block = chain_spec
+        .ethereum_fork_activation(EthereumHardfork::Paris)
+        .block_number()
+        .unwrap_or(u64::MAX);
+    let shanghai_timestamp = chain_spec
+        .ethereum_fork_activation(EthereumHardfork::Shanghai)
+        .as_timestamp()
+        .unwrap_or(u64::MAX);
+
+    Some((primordial_pulse_block, shanghai_timestamp))
+}
+
+fn pulse_shanghai_active_at<ChainSpec>(
+    chain_spec: &ChainSpec,
+    block_number: u64,
+    timestamp: u64,
+) -> bool
+where
+    ChainSpec: EthChainSpec + EthereumHardforks,
+{
+    if let Some((primordial_pulse_block, shanghai_timestamp)) = pulse_hardfork_context(chain_spec) {
+        return is_shanghai_active_at(
+            block_number,
+            timestamp,
+            primordial_pulse_block,
+            shanghai_timestamp,
+        );
+    }
+
+    chain_spec.is_shanghai_active_at_timestamp(timestamp)
+}
+
 fn primordial_pulse_block_for_chain_id(chain_id: u64) -> Option<u64> {
     match chain_id {
         PULSECHAIN_MAINNET_CHAIN_ID => Some(PRIMORDIAL_PULSE_BLOCK),
@@ -557,6 +708,75 @@ fn primordial_pulse_block_for_chain_id(chain_id: u64) -> Option<u64> {
 
 fn should_apply_primordial_pulse(block_number: u64, primordial_pulse_block: Option<u64>) -> bool {
     primordial_pulse_block == Some(block_number)
+}
+
+fn validate_pulse_block_pre_execution<B, ChainSpec>(
+    block: &SealedBlock<B>,
+    chain_spec: &ChainSpec,
+) -> Result<(), ConsensusError>
+where
+    B: BlockTrait,
+    ChainSpec: EthereumHardforks + EthChainSpec,
+{
+    validate_pulse_post_merge_hardfork_fields(block, chain_spec)?;
+
+    if let Err(error) = block.ensure_transaction_root_valid() {
+        return Err(ConsensusError::BodyTransactionRootDiff(error.into()));
+    }
+
+    if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) {
+        for tx in block.body().transactions() {
+            if tx.gas_limit() > MAX_TX_GAS_LIMIT_OSAKA {
+                return Err(TxGasLimitTooHighErr {
+                    tx_hash: *tx.tx_hash(),
+                    gas_limit: tx.gas_limit(),
+                    max_allowed: MAX_TX_GAS_LIMIT_OSAKA,
+                }
+                .into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_pulse_post_merge_hardfork_fields<B, ChainSpec>(
+    block: &SealedBlock<B>,
+    chain_spec: &ChainSpec,
+) -> Result<(), ConsensusError>
+where
+    B: BlockTrait,
+    ChainSpec: EthereumHardforks + EthChainSpec,
+{
+    let ommers_hash = block.body().calculate_ommers_root();
+    if Some(block.ommers_hash()) != ommers_hash {
+        return Err(ConsensusError::BodyOmmersHashDiff(
+            GotExpected {
+                got: ommers_hash.unwrap_or(EMPTY_OMMER_ROOT_HASH),
+                expected: block.ommers_hash(),
+            }
+            .into(),
+        ));
+    }
+
+    if pulse_shanghai_active_at(chain_spec, block.number(), block.timestamp()) {
+        validate_shanghai_withdrawals(block)?;
+    }
+
+    if chain_spec.is_cancun_active_at_timestamp(block.timestamp()) {
+        validate_cancun_gas(block)?;
+    }
+
+    if chain_spec.is_osaka_active_at_timestamp(block.timestamp())
+        && block.rlp_length() > MAX_RLP_BLOCK_SIZE
+    {
+        return Err(ConsensusError::BlockTooLarge {
+            rlp_length: block.rlp_length(),
+            max_rlp_length: MAX_RLP_BLOCK_SIZE,
+        });
+    }
+
+    Ok(())
 }
 
 fn apply_primordial_pulse_state<DB>(
@@ -704,6 +924,7 @@ mod tests {
 
     use super::*;
     use pulsechain_chainspec::PULSECHAIN_MAINNET;
+    use pulsechain_hardforks::ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP;
     use reth_ethereum::evm::revm::{
         primitives::{B256, alloy_primitives},
         state::AccountInfo,
@@ -776,6 +997,39 @@ mod tests {
         assert_eq!(
             consensus.validate_header_against_parent(&header, &parent),
             Err(ConsensusError::TheMergeDifficultyIsNotZero)
+        );
+    }
+
+    #[test]
+    fn pulse_consensus_uses_go_pulse_shanghai_rule_for_header_withdrawals() {
+        let consensus = PulseBeaconConsensus::new(pulsechain_reth_chainspec());
+        let mut header = pulse_transition_header(
+            PULSECHAIN_MAINNET.primordial_pulse_block - 1,
+            ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP,
+            B256::repeat_byte(0x55),
+            U256::ZERO,
+        );
+        header.withdrawals_root = Some(B256::ZERO);
+        consensus
+            .validate_header(&SealedHeader::new(header.clone(), B256::repeat_byte(0x56)))
+            .unwrap();
+
+        header.withdrawals_root = None;
+        assert_eq!(
+            consensus.validate_header(&SealedHeader::new(header, B256::repeat_byte(0x57))),
+            Err(ConsensusError::WithdrawalsRootMissing)
+        );
+
+        let mut pulse_header = pulse_transition_header(
+            PULSECHAIN_MAINNET.primordial_pulse_block,
+            ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP,
+            B256::repeat_byte(0x58),
+            U256::ZERO,
+        );
+        pulse_header.withdrawals_root = Some(B256::ZERO);
+        assert_eq!(
+            consensus.validate_header(&SealedHeader::new(pulse_header, B256::repeat_byte(0x59))),
+            Err(ConsensusError::WithdrawalsRootUnexpected)
         );
     }
 
@@ -878,6 +1132,39 @@ mod tests {
         assert_eq!(
             config.evm_env(&header).unwrap().cfg_env.chain_id,
             PULSECHAIN_MAINNET.chain_id
+        );
+    }
+
+    #[test]
+    fn evm_env_uses_go_pulse_shanghai_rule_around_primordial_pulse() {
+        let config = PulseEvmConfig {
+            inner: EthEvmConfig::new(pulsechain_reth_chainspec()),
+        };
+
+        let mut header = Header {
+            number: PULSECHAIN_MAINNET.primordial_pulse_block - 1,
+            timestamp: ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP,
+            ..Default::default()
+        };
+        assert_eq!(
+            config.evm_env(&header).unwrap().cfg_env.spec,
+            SpecId::SHANGHAI
+        );
+
+        header.number = PULSECHAIN_MAINNET.primordial_pulse_block;
+        assert!(
+            !config
+                .evm_env(&header)
+                .unwrap()
+                .cfg_env
+                .spec
+                .is_enabled_in(SpecId::SHANGHAI)
+        );
+
+        header.timestamp = PULSECHAIN_MAINNET.shanghai_timestamp;
+        assert_eq!(
+            config.evm_env(&header).unwrap().cfg_env.spec,
+            SpecId::SHANGHAI
         );
     }
 

@@ -15,6 +15,7 @@ pub const PULSECHAIN_TESTNET_V4_PRIMORDIAL_PULSE_BLOCK: u64 = 16_492_700;
 pub const PULSECHAIN_TTD_OFFSET: u64 = 131_072;
 pub const PULSECHAIN_SHANGHAI_TIMESTAMP: u64 = 1_683_786_515;
 pub const PULSECHAIN_TESTNET_V4_SHANGHAI_TIMESTAMP: u64 = 1_682_700_369;
+pub const ETHEREUM_MAINNET_LONDON_BLOCK: u64 = 12_965_000;
 pub const ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP: u64 = 1_681_338_455;
 
 pub const PULSECHAIN_TERMINAL_TOTAL_DIFFICULTY: U256 =
@@ -131,6 +132,10 @@ pub const fn is_shanghai_active_at(
     primordial_pulse_block: u64,
     pulsechain_shanghai_timestamp: u64,
 ) -> bool {
+    if block_number < ETHEREUM_MAINNET_LONDON_BLOCK {
+        return false;
+    }
+
     if is_before_primordial_pulse_at(block_number, primordial_pulse_block) {
         timestamp >= ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP
     } else {
@@ -160,6 +165,10 @@ mod tests {
 
     #[test]
     fn shanghai_uses_ethereum_time_before_pulse_and_pulse_time_after() {
+        assert!(!is_shanghai_active(
+            ETHEREUM_MAINNET_LONDON_BLOCK - 1,
+            ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP
+        ));
         assert!(is_shanghai_active(
             17_232_999,
             ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP

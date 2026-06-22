@@ -1,13 +1,7 @@
 [workspace]
 members = [
     "bin/rpls",
-    "crates/pulsechain/chainspec",
-    "crates/pulsechain/hardforks",
-    "crates/pulsechain/consensus",
-    "crates/pulsechain/evm",
-    "crates/pulsechain/node",
-    "crates/pulsechain/rpc",
-    "crates/pulsechain/tests",
+    "crates/pulsechain/*",
 ]
 resolver = "2"
 

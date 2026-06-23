@@ -12,15 +12,14 @@ rpls node integration for PulseChain.
 - Applies sacrifice credits, testnet-v4 treasury credit, and deposit contract replacement.
 - Installs `PulseBeaconConsensus`, wrapping the upstream beacon consensus.
 - Allows the otherwise-invalid POS-to-POW header transition at PrimordialPulse and rejects it outside the fork block.
+- Applies go-pulse Ethash-style POW header checks for nonzero-difficulty headers, including PrimordialPulse TTD-offset difficulty, future timestamp, gas, London base-fee presence/absence, DAO fork extra-data, and Shanghai/Cancun field rejection.
 - Delegates normal body, pre-execution, post-execution, and POS header checks to upstream validation helpers.
 
 ## Not Complete
 
-- Full Ethash-style verification for the PrimordialPulse POW-shaped header is only partially represented. go-pulse delegates this header to `ethone.VerifyHeader`, including difficulty calculation and DAO extra-data checks.
 - Live peer handshake compatibility has not been proven yet.
 - Golden block/state-root/receipt-root fixtures around PrimordialPulse are not built yet.
-- Fast trusted-checkpoint mode is represented as a mode, but not implemented as a running sync service.
 
 ## Verification
 
-- Unit tests cover chain parsing, chain spec identity, executor trigger boundaries, transaction chain ID overrides, PrimordialPulse state mutation, deposit replacement, sacrifice allocation, testnet-v4 treasury behavior, and Pulse consensus boundary behavior.
+- Unit tests cover chain parsing, chain spec identity, executor trigger boundaries, transaction chain ID overrides, PrimordialPulse state mutation, deposit replacement, sacrifice allocation, testnet-v4 treasury behavior, Pulse consensus boundary behavior, and POW header DAO/base-fee parity.

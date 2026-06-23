@@ -82,6 +82,8 @@ const DIFFICULTY_BOUND_DIVISOR: u64 = 2048;
 const MINIMUM_DIFFICULTY: u64 = 131_072;
 const FRONTIER_DURATION_LIMIT_SECONDS: u64 = 13;
 const EXP_DIFFICULTY_PERIOD: u64 = 100_000;
+const DAO_FORK_EXTRA_RANGE: u64 = 10;
+const DAO_FORK_EXTRA_DATA: &[u8] = b"dao-hard-fork";
 
 #[derive(Debug, Clone, Default)]
 pub struct PulseChainSpecParser;
@@ -400,8 +402,9 @@ where
         }
 
         validate_header_extra_data(header)?;
+        self.validate_pow_dao_extra_data(header)?;
         validate_header_gas(header)?;
-        validate_header_base_fee(header, chain_spec)?;
+        self.validate_pow_base_fee(header)?;
 
         if pulse_shanghai_active_at(chain_spec, header.number(), header.timestamp())
             || header.withdrawals_root().is_some()
@@ -471,6 +474,55 @@ where
         ChainSpec: EthChainSpec<Header = H>,
     {
         self.validate_pow_header_standalone(header)
+    }
+
+    fn validate_pow_dao_extra_data<H: BlockHeader>(
+        &self,
+        header: &H,
+    ) -> Result<(), ConsensusError> {
+        let chain_config = &self.inner.chain_spec().genesis().config;
+        let Some(dao_fork_block) = chain_config.dao_fork_block else {
+            return Ok(());
+        };
+
+        let Some(dao_fork_limit) = dao_fork_block.checked_add(DAO_FORK_EXTRA_RANGE) else {
+            return Err(ConsensusError::Other(
+                "invalid DAO fork extra-data validation range".to_string(),
+            ));
+        };
+
+        if header.number() < dao_fork_block || header.number() >= dao_fork_limit {
+            return Ok(());
+        }
+
+        let has_dao_extra_data = header.extra_data().as_ref() == DAO_FORK_EXTRA_DATA;
+        if chain_config.dao_fork_support && !has_dao_extra_data {
+            return Err(ConsensusError::Other(
+                "bad DAO pro-fork extra-data".to_string(),
+            ));
+        }
+        if !chain_config.dao_fork_support && has_dao_extra_data {
+            return Err(ConsensusError::Other(
+                "bad DAO no-fork extra-data".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_pow_base_fee<H: BlockHeader>(&self, header: &H) -> Result<(), ConsensusError> {
+        let chain_spec = self.inner.chain_spec();
+        if chain_spec.is_london_active_at_block(header.number()) {
+            return validate_header_base_fee(header, chain_spec);
+        }
+
+        if let Some(base_fee) = header.base_fee_per_gas() {
+            return Err(ConsensusError::Other(format!(
+                "invalid baseFee before fork: have {base_fee}, expected nil"
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -1333,6 +1385,46 @@ mod tests {
             consensus.validate_header(&SealedHeader::new(header, B256::repeat_byte(0x4a))),
             Err(ConsensusError::WithdrawalsRootUnexpected)
         );
+    }
+
+    #[test]
+    fn pulse_consensus_rejects_pre_london_pow_base_fee() {
+        let consensus = PulseBeaconConsensus::new(pulsechain_rpls_chainspec());
+        let header = SealedHeader::new(
+            pulse_transition_header(
+                1_919_999,
+                1_000,
+                B256::repeat_byte(0x4b),
+                U256::from(1_000_000_000u64),
+            ),
+            B256::repeat_byte(0x4c),
+        );
+
+        let err = consensus.validate_header(&header).unwrap_err();
+        assert!(err.to_string().contains("invalid baseFee before fork"));
+    }
+
+    #[test]
+    fn pulse_consensus_enforces_dao_extra_data_on_pow_headers() {
+        let consensus = PulseBeaconConsensus::new(pulsechain_rpls_chainspec());
+        let mut header = pulse_transition_header(
+            1_920_000,
+            1_000,
+            B256::repeat_byte(0x4d),
+            U256::from(1_000_000_000u64),
+        );
+        header.base_fee_per_gas = None;
+
+        let err = consensus
+            .validate_header(&SealedHeader::new(header.clone(), B256::repeat_byte(0x4e)))
+            .unwrap_err();
+        assert!(err.to_string().contains("bad DAO pro-fork extra-data"));
+        println!("{:?}", DAO_FORK_EXTRA_DATA);
+
+        header.extra_data = DAO_FORK_EXTRA_DATA.to_vec().into();
+        consensus
+            .validate_header(&SealedHeader::new(header, B256::repeat_byte(0x4f)))
+            .unwrap();
     }
 
     #[test]

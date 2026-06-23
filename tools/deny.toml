@@ -1,0 +1,46 @@
+[graph]
+all-features = true
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Transitive advisories currently constrained by upstream reth dependencies.
+ignore = [
+    "RUSTSEC-2025-0141", # bincode (imported by reth-stages): Should be fixed on reth v2.3.0
+    "RUSTSEC-2026-0118", # hickory-proto: fixed in 0.26.1, Should be fixed on reth v2.3.0
+    "RUSTSEC-2026-0119", # hickory-proto: fixed in 0.26.1, Should be fixed on reth v2.3.0
+    "RUSTSEC-2024-0436", # paste: Should be fixed on reth v2.3.0
+    "RUSTSEC-2026-0173", # proc-macro-error2: Should be fixed on reth v2.3.0
+]
+
+[licenses]
+unused-allowed-license = "allow"
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+]
+exceptions = [
+  { allow = ["CDLA-Permissive-2.0"], name = "webpki-roots", version = "*" },
+  { allow = ["CDLA-Permissive-2.0"], name = "webpki-root-certs", version = "*" },
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/paradigmxyz/reth"]

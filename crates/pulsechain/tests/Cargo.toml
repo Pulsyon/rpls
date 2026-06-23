@@ -9,4 +9,3 @@ alloy-primitives.workspace = true
 pulsechain-chainspec.workspace = true
 pulsechain-evm.workspace = true
 pulsechain-hardforks.workspace = true
-pulsechain-rpc.workspace = true

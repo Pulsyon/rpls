@@ -28,20 +28,20 @@ Upstream execution pin: `ab2b11f40eed3623219c49022061a11a0b5e2c0c`.
 - Beacon consensus allows the normally-invalid transition from parent difficulty `0` to header difficulty `>0` only at PrimordialPulse. See `go-pulse-repo/consensus/beacon/consensus.go:119`.
 - Batched beacon header verification has explicit PulseChain cases for `POS[eth] => POW fork block[pls]` and `POS[eth] => POW fork block[pls] => POS[pls]`. See `go-pulse-repo/consensus/beacon/consensus.go:148`.
 - Bootnodes and Pulse DNS discovery are defined in `go-pulse-repo/params/bootnodes.go:31` and `go-pulse-repo/params/bootnodes.go:118`.
+- Pulse fork ID schedules include inherited Ethereum block forks, the PrimordialPulse block fork, and the Pulse Shanghai timestamp fork. The current Rust fork ID tests encode go-pulse-derived mainnet and testnet-v4 expectations around these boundaries.
 - Pulse genesis uses Ethereum mainnet genesis state/header fields with Pulse config. See `go-pulse-repo/core/genesis.go:627`.
 
 ## Current Rust State
 
 - `crates/pulsechain/hardforks` implements verified phase, transaction chain ID, Shanghai, TTD, compatibility, and fork predicates for mainnet and testnet-v4.
-- `crates/pulsechain/chainspec` captures verified mainnet/testnet-v4 constants, inherited Ethereum fork schedule, genesis hash compatibility, optional treasury config, bootnodes, Pulse DNS discovery URLs, and rpls network bootstrap adapters.
+- `crates/pulsechain/chainspec` captures verified mainnet/testnet-v4 constants, inherited Ethereum fork schedule, genesis hash compatibility, optional treasury config, bootnodes, Pulse DNS discovery URLs, go-pulse-compatible fork ID filters, and rpls network bootstrap adapters.
 - `crates/pulsechain/evm` embeds and validates the official mainnet and testnet-v4 sacrifice allocation artifacts and deposit contract artifacts.
 - `crates/pulsechain/consensus` encodes the PrimordialPulse difficulty, terminal PoW, and POS-to-POW transition helper rules.
 - `crates/pulsechain/node` wraps the upstream EVM configuration, applies the PrimordialPulse state mutation at the configured fork block, overrides the EVM transaction chain ID to Ethereum mainnet before PrimordialPulse and PulseChain at/after the fork, and installs a Pulse consensus wrapper over the upstream beacon consensus.
-- `crates/pulsechain/rpc` contains Pulse mainnet and testnet-v4 identity helpers.
-- `bin/rpls` wires the chainspec bootnode and DNS discovery adapters into rpls before networking starts, and defaults node storage to the OS app-data directory named `rpls`.
+- `bin/rpls` installs the Pulse network builder, executor, and consensus wrapper. The network builder applies Pulse DNS discovery and go-pulse-compatible fork ID filters before networking starts. The binary also defaults node storage to the OS app-data directory named `rpls`.
 
 ## Required Next Hooks
 
-1. Confirm whether the network/fork-id calculation from the Pulse `ChainSpec` matches go-pulse peers. If not, customize the network/fork-id hook.
+1. Validate live peer handshake compatibility against go-pulse peers using the installed Pulse fork ID filters.
 2. Build golden fixtures from `go-pulse` for blocks `17_232_999`, `17_233_000`, `17_233_001`, and at least 100 post-fork blocks, then compare headers, state roots, receipt roots, and transaction recovery.
 3. Add trace/debug compatibility fixtures once block import parity is proven.

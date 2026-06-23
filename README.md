@@ -14,13 +14,12 @@ cargo run -p rpls
 
 ## Workspace
 
-- `bin/rpls`: rpls CLI entry point with Pulse chain parsing, executor/consensus installation, artifact validation, default storage path, default bootnode injection, and Pulse DNS discovery bootstrap.
-- `crates/pulsechain/chainspec`: Pulse mainnet/testnet-v4 constants, Ethereum historical forks, genesis hash, optional treasury config, bootnodes, and Pulse DNS discovery URLs.
+- `bin/rpls`: rpls CLI entry point with Pulse chain parsing, executor/consensus/network installation, artifact validation, default storage/log paths, default bootnode injection, Pulse DNS discovery bootstrap, fork ID filtering, and optional minimal pruning defaults.
+- `crates/pulsechain/chainspec`: Pulse mainnet/testnet-v4 constants, Ethereum historical forks, genesis hash, optional treasury config, bootnodes, Pulse DNS discovery URLs, and go-pulse-compatible fork ID filters.
 - `crates/pulsechain/hardforks`: PrimordialPulse phase, transaction chain ID transition, Shanghai timing, and compatibility predicates.
 - `crates/pulsechain/consensus`: Pulse difficulty, TTD, and header-transition helper rules.
 - `crates/pulsechain/evm`: sacrifice allocation parser, embedded allocation artifacts, and deposit contract artifacts.
 - `crates/pulsechain/node`: rpls node integration, Pulse consensus wrapper, EVM env chain ID override, and PrimordialPulse executor state mutation.
-- `crates/pulsechain/rpc`: mainnet/testnet-v4 RPC identity helpers.
 - `crates/pulsechain/tests`: cross-crate validation tests.
 
 ## Verified Pins
@@ -42,7 +41,7 @@ cargo run -p rpls
 ## Remaining Validation Work
 
 - Golden block/state-root/receipt-root comparison against go-pulse around PrimordialPulse.
-- Fork ID / peer handshake parity validation against go-pulse peers.
+- Live peer handshake compatibility validation against go-pulse peers.
 - Trace/debug compatibility tests.
 
 See [docs/implementation-notes.md](docs/implementation-notes.md) for source-backed protocol notes.

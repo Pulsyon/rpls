@@ -17,7 +17,7 @@ rpls node integration for PulseChain.
 ## Not Complete
 
 - Full Ethash-style verification for the PrimordialPulse POW-shaped header is only partially represented. go-pulse delegates this header to `ethone.VerifyHeader`, including difficulty calculation and DAO extra-data checks.
-- Fork ID and peer handshake parity have not been proven or customized.
+- Live peer handshake compatibility has not been proven yet.
 - Golden block/state-root/receipt-root fixtures around PrimordialPulse are not built yet.
 - Fast trusted-checkpoint mode is represented as a mode, but not implemented as a running sync service.
 

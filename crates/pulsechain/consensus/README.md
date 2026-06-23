@@ -12,7 +12,6 @@ Dependency-light PulseChain consensus helper rules.
 ## Not Here
 
 - Full header validation is implemented by `PulseBeaconConsensus` in `crates/pulsechain/node`.
-- Full Ethash-style verification for the PrimordialPulse POW-shaped header is not complete yet.
 - Golden block import fixtures are not in this crate.
 
 ## Verification

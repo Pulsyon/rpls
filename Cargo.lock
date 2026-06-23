@@ -5425,13 +5425,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pulsechain-rpc"
-version = "0.1.0"
-dependencies = [
- "pulsechain-hardforks",
-]
-
-[[package]]
 name = "pulsechain-tests"
 version = "0.1.0"
 dependencies = [
@@ -5439,7 +5432,6 @@ dependencies = [
  "pulsechain-chainspec",
  "pulsechain-evm",
  "pulsechain-hardforks",
- "pulsechain-rpc",
 ]
 
 [[package]]

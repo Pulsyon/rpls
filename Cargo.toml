@@ -38,4 +38,3 @@ pulsechain-consensus = { path = "crates/pulsechain/consensus" }
 pulsechain-evm = { path = "crates/pulsechain/evm" }
 pulsechain-hardforks = { path = "crates/pulsechain/hardforks" }
 pulsechain-node = { path = "crates/pulsechain/node" }
-pulsechain-rpc = { path = "crates/pulsechain/rpc" }

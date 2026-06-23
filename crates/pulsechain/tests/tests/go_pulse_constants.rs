@@ -4,7 +4,6 @@ use pulsechain_evm::sacrifice::{MAINNET_ALLOCATION, find_credit};
 use pulsechain_hardforks::{
     effective_chain_id, effective_chain_id_at, is_shanghai_active, is_shanghai_active_at,
 };
-use pulsechain_rpc::{eth_chain_id_hex, net_version};
 
 #[test]
 fn verified_constants_match_go_pulse() {
@@ -15,8 +14,8 @@ fn verified_constants_match_go_pulse() {
         "58750003716598352947541"
     );
     assert_eq!(PULSECHAIN_MAINNET.shanghai_timestamp, 1_683_786_515);
-    assert_eq!(eth_chain_id_hex(), "0x171");
-    assert_eq!(net_version(), "369");
+    assert_eq!(PULSECHAIN_MAINNET.chain_id, 0x171);
+    assert_eq!(PULSECHAIN_MAINNET.network_id, 369);
 }
 
 #[test]

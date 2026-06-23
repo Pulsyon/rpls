@@ -76,39 +76,12 @@ use reth_ethereum::{
     provider::BlockExecutionResult,
     rpc::types::engine::ExecutionData,
 };
-use thiserror::Error;
 
 const ALLOWED_FUTURE_BLOCK_TIME_SECONDS: u64 = 15;
 const DIFFICULTY_BOUND_DIVISOR: u64 = 2048;
 const MINIMUM_DIFFICULTY: u64 = 131_072;
 const FRONTIER_DURATION_LIMIT_SECONDS: u64 = 13;
 const EXP_DIFFICULTY_PERIOD: u64 = 100_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyncMode {
-    FastMvpTrustedCheckpoint,
-    FullValidation,
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum PulseNodeError {
-    #[error(transparent)]
-    Consensus(#[from] PulseConsensusError),
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct PulseChainNode;
-
-impl PulseChainNode {
-    pub fn assert_supported(mode: SyncMode) -> Result<(), PulseNodeError> {
-        match mode {
-            SyncMode::FastMvpTrustedCheckpoint => Ok(()),
-            SyncMode::FullValidation => {
-                pulsechain_consensus::assert_full_validation_ready().map_err(Into::into)
-            }
-        }
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct PulseChainSpecParser;
@@ -1180,14 +1153,6 @@ mod tests {
         primitives::{B256, alloy_primitives},
         state::AccountInfo,
     };
-
-    #[test]
-    fn full_validation_uses_pulse_executor_and_consensus() {
-        assert_eq!(
-            PulseChainNode::assert_supported(SyncMode::FullValidation),
-            Ok(())
-        );
-    }
 
     #[test]
     fn pulse_chainspec_does_not_inherit_ethereum_post_shanghai_forks() {

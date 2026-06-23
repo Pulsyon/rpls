@@ -78,12 +78,34 @@
                 exec cargo build ${profileArgs} --manifest-path "$workspace_root/Cargo.toml" --bin rpls "$@"
               '';
             };
+          deny = pkgs.writeShellApplication {
+            name = "rpls-deny";
+            runtimeInputs = [
+              pkgs.cargo-deny
+            ];
+            text = ''
+              workspace_root="''${RPLS_WORKSPACE_ROOT:-$PWD}"
+
+              if [ ! -f "$workspace_root/Cargo.toml" ]; then
+                echo "rpls-deny: run from the reth-pulse checkout or set RPLS_WORKSPACE_ROOT" >&2
+                exit 1
+              fi
+
+              exec cargo deny \
+                --manifest-path "$workspace_root/Cargo.toml" \
+                check \
+                --config "$workspace_root/tools/deny.toml" \
+                "$@"
+            '';
+          };
         in
         {
           default = mkRunWrapper "rpls" "--release";
           debug = mkRunWrapper "rpls-debug" "";
+          release = mkRunWrapper "rpls-release" "--release";
           build-debug = mkBuildWrapper "rpls-build-debug" "";
           build-release = mkBuildWrapper "rpls-build-release" "--release";
+          inherit deny;
         }
       );
 
@@ -101,6 +123,7 @@
           release = mkApp self.packages.${system}.release "rpls-release";
           build-debug = mkApp self.packages.${system}.build-debug "rpls-build-debug";
           build-release = mkApp self.packages.${system}.build-release "rpls-build-release";
+          deny = mkApp self.packages.${system}.deny "rpls-deny";
         }
       );
 

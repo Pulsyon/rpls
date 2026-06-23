@@ -19,6 +19,12 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "Zlib",
+    "0BSD",
+    "Unlicense",
+]
+exceptions = [
+  { allow = ["CDLA-Permissive-2.0"], name = "webpki-roots", version = "*" },
+  { allow = ["CDLA-Permissive-2.0"], name = "webpki-root-certs", version = "*" },
 ]
 confidence-threshold = 0.8
 

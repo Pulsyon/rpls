@@ -27,11 +27,6 @@ cargo run -p rpls
 - Upstream execution pin: `ab2b11f40eed3623219c49022061a11a0b5e2c0c`
 - go-pulse source used for validation: `a224d91967a31c2c3080a8f75784d8de13c80b7b`
 
-## Sync Modes
-
-- Mode A, fast MVP trusted checkpoint: allowed by the node gate, but not implemented as a running rpls service yet.
-- Mode B, full validation: installs the Pulse executor and Pulse consensus wrapper over upstream Ethereum node components.
-
 ## Built-In Chains
 
 - `pulsechain`: PulseChain mainnet, matching go-pulse `--pulsechain`.

@@ -9,7 +9,9 @@ use clap::Parser;
 use pulsechain_chainspec::{PulseNetworkBuilder, apply_default_pulsechain_bootnodes};
 use pulsechain_evm::sacrifice::MAINNET_ALLOCATION;
 use pulsechain_hardforks::{PULSECHAIN_MAINNET_CHAIN_ID, PULSECHAIN_TESTNET_V4_CHAIN_ID};
-use pulsechain_node::{PulseChainSpecParser, PulseConsensusBuilder, PulseExecutorBuilder};
+use pulsechain_node::{
+    PulseChainSpecParser, PulseConsensusBuilder, PulseExecutorBuilder, PulseNode,
+};
 use reth_ethereum::{
     cli::interface::{Cli, Commands},
     node::{EthereumNode, node::EthereumAddOns},
@@ -60,7 +62,7 @@ fn main() {
 
     cli.run(|builder, _| async move {
         let handle = builder
-            .with_types::<EthereumNode>()
+            .with_types::<PulseNode>()
             .with_components(
                 EthereumNode::components()
                     .network(PulseNetworkBuilder)

@@ -16,6 +16,7 @@ Pure PulseChain fork constants and fork-selection predicates.
 
 - These helpers do not depend on the node stack and do not validate headers directly.
 - Consensus integration lives in `crates/pulsechain/node`.
+- Storage integration that preserves Shanghai-gap withdrawals lives in `crates/pulsechain/storage`.
 - EVM state changes live in `crates/pulsechain/evm` and `crates/pulsechain/node`.
 
 ## Verification

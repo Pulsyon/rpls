@@ -12,6 +12,7 @@ Dependency-light PulseChain consensus helper rules.
 ## Not Here
 
 - Full header validation is implemented by `PulseBeaconConsensus` in `crates/pulsechain/node`.
+- Block-body storage behavior for withdrawals lives in `crates/pulsechain/storage`.
 - Golden block import fixtures are not in this crate.
 
 ## Verification

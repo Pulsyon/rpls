@@ -1,0 +1,10 @@
+[package]
+name = "pulsechain-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+alloy-consensus.workspace = true
+pulsechain-hardforks.workspace = true
+reth-ethereum.workspace = true

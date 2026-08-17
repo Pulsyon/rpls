@@ -14,6 +14,7 @@ PulseChain fork artifacts and EVM-state data helpers.
 
 - Applying sacrifice credits and deposit replacement into node state happens in `crates/pulsechain/node`.
 - Transaction execution and EVM environment overrides are handled by `crates/pulsechain/node`.
+- Withdrawal body storage behavior is handled by `crates/pulsechain/storage`.
 - RPC exposure is handled by the `rpls` binary through the upstream node RPC stack.
 
 ## Verification

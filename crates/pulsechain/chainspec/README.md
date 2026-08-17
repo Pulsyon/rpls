@@ -17,6 +17,7 @@ PulseChain chain metadata and static network constants.
 
 - `ChainSpec` construction is done in `crates/pulsechain/node`.
 - Fork predicates and transaction chain ID transition rules live in `crates/pulsechain/hardforks`.
+- Storage behavior that interprets those fork timings for block-body reads lives in `crates/pulsechain/storage`.
 - Bootnode, DNS discovery, and fork ID filter installation are done by the `PulseNetworkBuilder` used by `bin/rpls`.
 
 ## Verification

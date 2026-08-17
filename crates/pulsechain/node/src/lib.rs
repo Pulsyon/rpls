@@ -25,6 +25,7 @@ use pulsechain_hardforks::{
     PULSECHAIN_TESTNET_V4_PRIMORDIAL_PULSE_BLOCK, PULSECHAIN_TTD_OFFSET, is_shanghai_active_at,
     transaction_chain_id_at,
 };
+use pulsechain_storage::PulseStorage;
 use reth_cli::chainspec::ChainSpecParser;
 use reth_ethereum::{
     Block, EthPrimitives, Receipt, TransactionSigned,
@@ -49,19 +50,20 @@ use reth_ethereum::{
             Database, EthEvmFactory, Evm, EvmEnv, EvmEnvFor, ExecutionCtxFor, InspectorFor,
             NextBlockEnvAttributes, OnStateHook,
             block::{BlockExecutor, BlockExecutorFactory, BlockExecutorFor, ExecutableTx},
-            eth::{EthBlockExecutionCtx, EthBlockExecutor},
+            eth::{EthBlockExecutionCtx, EthBlockExecutor, spec::EthExecutorSpec},
             execute::{BlockExecutionError, InternalBlockExecutionError},
             precompiles::PrecompilesMap,
         },
         revm::{
             Database as _, DatabaseCommit,
-            context::{CfgEnv, TxEnv, result::ResultAndState},
+            context::{TxEnv, result::ResultAndState},
             db::State,
             primitives::{Address, B256, U256, hardfork::SpecId},
             state::{Account, Bytecode, EvmState, EvmStorage, EvmStorageSlot},
         },
     },
     node::{
+        EthEngineTypes,
         api::{ConfigureEngineEvm, ConfigureEvm, ExecutableTxIterator, FullNodeTypes, NodeTypes},
         builder::{
             BuilderContext,
@@ -76,7 +78,6 @@ use reth_ethereum::{
     provider::BlockExecutionResult,
     rpc::types::engine::ExecutionData,
 };
-
 const ALLOWED_FUTURE_BLOCK_TIME_SECONDS: u64 = 15;
 const DIFFICULTY_BOUND_DIVISOR: u64 = 2048;
 const MINIMUM_DIFFICULTY: u64 = 131_072;
@@ -84,6 +85,17 @@ const FRONTIER_DURATION_LIMIT_SECONDS: u64 = 13;
 const EXP_DIFFICULTY_PERIOD: u64 = 100_000;
 const DAO_FORK_EXTRA_RANGE: u64 = 10;
 const DAO_FORK_EXTRA_DATA: &[u8] = b"dao-hard-fork";
+/// Type configuration for an rpls node.
+#[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
+pub struct PulseNode;
+
+impl NodeTypes for PulseNode {
+    type Primitives = EthPrimitives;
+    type ChainSpec = ChainSpec;
+    type Storage = PulseStorage;
+    type Payload = EthEngineTypes;
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct PulseChainSpecParser;
@@ -586,15 +598,29 @@ impl BlockExecutorFactory for PulseEvmConfig {
         I: InspectorFor<Self, &'a mut State<DB>> + 'a,
     {
         let chain_id = self.inner.chain_spec().chain().id();
-        let primordial_pulse_block =
-            primordial_pulse_block_for_chain(chain_id, self.inner.chain_spec());
+        let pulse_context = pulse_hardfork_context(self.inner.chain_spec());
+        let primordial_pulse_block = pulse_context.map(|(block, _)| block);
         let treasury = pulsechain_spec_for_chain_id(chain_id).and_then(|spec| spec.treasury);
+        let block_number = evm.block().number.saturating_to();
+        let block_timestamp = evm.block().timestamp.saturating_to();
+        let executor_spec = PulseExecutorSpec {
+            chain_spec: self.inner.chain_spec(),
+            paris_active: pulse_context.map(|_| evm.block().difficulty.is_zero()),
+            shanghai_active: pulse_context.map(|(primordial_pulse_block, shanghai_timestamp)| {
+                is_shanghai_active_at(
+                    block_number,
+                    block_timestamp,
+                    primordial_pulse_block,
+                    shanghai_timestamp,
+                )
+            }),
+        };
 
         PulseBlockExecutor {
             inner: EthBlockExecutor::new(
                 evm,
                 ctx,
-                self.inner.chain_spec(),
+                executor_spec,
                 self.inner.executor_factory.receipt_builder(),
             ),
             primordial_pulse_block,
@@ -621,7 +647,13 @@ impl ConfigureEvm for PulseEvmConfig {
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv<SpecId>, Self::Error> {
         let mut env = self.inner.evm_env(header)?;
-        self.apply_pulse_cfg_env(&mut env.cfg_env, header.number, header.timestamp);
+        self.apply_pulse_evm_env(
+            &mut env,
+            header.number,
+            header.timestamp,
+            header.difficulty.is_zero().then_some(header.mix_hash),
+            Some(header.difficulty),
+        );
         Ok(env)
     }
 
@@ -631,10 +663,12 @@ impl ConfigureEvm for PulseEvmConfig {
         attributes: &NextBlockEnvAttributes,
     ) -> Result<EvmEnv<SpecId>, Self::Error> {
         let mut env = self.inner.next_evm_env(parent, attributes)?;
-        self.apply_pulse_cfg_env(
-            &mut env.cfg_env,
+        self.apply_pulse_evm_env(
+            &mut env,
             parent.number.saturating_add(1),
             attributes.timestamp,
+            self.next_block_merge_random(parent, attributes.prev_randao),
+            self.next_block_pow_difficulty(parent.number.saturating_add(1)),
         );
         Ok(env)
     }
@@ -658,10 +692,12 @@ impl ConfigureEvm for PulseEvmConfig {
 impl ConfigureEngineEvm<ExecutionData> for PulseEvmConfig {
     fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<EvmEnvFor<Self>, Self::Error> {
         let mut env = self.inner.evm_env_for_payload(payload)?;
-        self.apply_pulse_cfg_env(
-            &mut env.cfg_env,
+        self.apply_pulse_evm_env(
+            &mut env,
             payload.payload.block_number(),
             payload.payload.timestamp(),
+            Some(payload.payload.as_v1().prev_randao),
+            None,
         );
         Ok(env)
     }
@@ -682,22 +718,46 @@ impl ConfigureEngineEvm<ExecutionData> for PulseEvmConfig {
 }
 
 impl PulseEvmConfig {
-    fn apply_pulse_cfg_env(&self, cfg_env: &mut CfgEnv<SpecId>, block_number: u64, timestamp: u64) {
-        cfg_env.chain_id = self.transaction_chain_id(block_number);
+    fn apply_pulse_evm_env(
+        &self,
+        env: &mut EvmEnv<SpecId>,
+        block_number: u64,
+        timestamp: u64,
+        merge_random: Option<B256>,
+        pow_difficulty: Option<U256>,
+    ) {
+        env.cfg_env.chain_id = self.transaction_chain_id(block_number);
 
         let Some((primordial_pulse_block, shanghai_timestamp)) = self.pulse_hardfork_context()
         else {
             return;
         };
 
-        if is_shanghai_active_at(
-            block_number,
-            timestamp,
-            primordial_pulse_block,
-            shanghai_timestamp,
-        ) && cfg_env.spec < SpecId::SHANGHAI
+        let is_merge = merge_random.is_some();
+        if let Some(prevrandao) = merge_random {
+            env.block_env.difficulty = U256::ZERO;
+            env.block_env.prevrandao = Some(prevrandao);
+            if env.cfg_env.spec < SpecId::MERGE {
+                env.cfg_env.spec = SpecId::MERGE;
+            }
+        } else if let Some(difficulty) = pow_difficulty {
+            env.block_env.difficulty = difficulty;
+            env.block_env.prevrandao = None;
+            if env.cfg_env.spec >= SpecId::MERGE {
+                env.cfg_env.spec = SpecId::LONDON;
+            }
+        }
+
+        if is_merge
+            && is_shanghai_active_at(
+                block_number,
+                timestamp,
+                primordial_pulse_block,
+                shanghai_timestamp,
+            )
+            && env.cfg_env.spec < SpecId::SHANGHAI
         {
-            cfg_env.spec = SpecId::SHANGHAI;
+            env.cfg_env.spec = SpecId::SHANGHAI;
         }
     }
 
@@ -727,10 +787,73 @@ impl PulseEvmConfig {
 
         Some((primordial_pulse_block, shanghai_timestamp))
     }
+
+    fn next_block_merge_random(&self, parent: &Header, prev_randao: B256) -> Option<B256> {
+        let next_block = parent.number.saturating_add(1);
+        let Some((primordial_pulse_block, _)) = self.pulse_hardfork_context() else {
+            return Some(prev_randao);
+        };
+
+        if next_block == primordial_pulse_block {
+            return None;
+        }
+        if parent.difficulty.is_zero() || next_block > primordial_pulse_block {
+            return Some(prev_randao);
+        }
+        None
+    }
+
+    fn next_block_pow_difficulty(&self, block_number: u64) -> Option<U256> {
+        let (primordial_pulse_block, _) = self.pulse_hardfork_context()?;
+
+        (block_number == primordial_pulse_block).then(|| U256::from(PULSECHAIN_TTD_OFFSET))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PulseExecutorSpec<'a> {
+    chain_spec: &'a Arc<ChainSpec>,
+    /// go-pulse determines whether Paris is active from the current header's difficulty.
+    paris_active: Option<bool>,
+    /// Pulse uses Ethereum Shanghai timing before PrimordialPulse and Pulse timing afterwards.
+    shanghai_active: Option<bool>,
+}
+
+impl EthereumHardforks for PulseExecutorSpec<'_> {
+    fn ethereum_fork_activation(&self, fork: EthereumHardfork) -> ForkCondition {
+        let activation = match fork {
+            EthereumHardfork::Paris => self.paris_active.map(|active| {
+                if active {
+                    ForkCondition::ZERO_BLOCK
+                } else {
+                    ForkCondition::Never
+                }
+            }),
+            EthereumHardfork::Shanghai => self.shanghai_active.map(|active| {
+                if active {
+                    ForkCondition::ZERO_TIMESTAMP
+                } else {
+                    ForkCondition::Never
+                }
+            }),
+            _ => None,
+        };
+        if let Some(activation) = activation {
+            return activation;
+        }
+
+        self.chain_spec.ethereum_fork_activation(fork)
+    }
+}
+
+impl EthExecutorSpec for PulseExecutorSpec<'_> {
+    fn deposit_contract_address(&self) -> Option<Address> {
+        EthExecutorSpec::deposit_contract_address(self.chain_spec.as_ref())
+    }
 }
 
 pub struct PulseBlockExecutor<'a, Evm> {
-    inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
+    inner: EthBlockExecutor<'a, Evm, PulseExecutorSpec<'a>, &'a RethReceiptBuilder>,
     primordial_pulse_block: Option<u64>,
     chain_id: u64,
     treasury: Option<TreasuryCredit>,
@@ -789,6 +912,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn primordial_pulse_block_for_chain(chain_id: u64, chain_spec: &ChainSpec) -> Option<u64> {
     match chain_id {
         PULSECHAIN_MAINNET_CHAIN_ID | PULSECHAIN_TESTNET_V4_CHAIN_ID => chain_spec.paris_block(),
@@ -1199,11 +1323,16 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+    use alloy_eips::eip4895::{Withdrawal, Withdrawals};
     use pulsechain_chainspec::PULSECHAIN_MAINNET;
     use pulsechain_hardforks::ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP;
-    use reth_ethereum::evm::revm::{
-        primitives::{B256, alloy_primitives},
-        state::AccountInfo,
+    use reth_ethereum::evm::{
+        primitives::block::state_changes::post_block_balance_increments,
+        revm::{
+            context::BlockEnv,
+            primitives::{B256, alloy_primitives},
+            state::AccountInfo,
+        },
     };
 
     #[test]
@@ -1565,6 +1694,84 @@ mod tests {
     }
 
     #[test]
+    fn pulse_executor_spec_routes_gap_withdrawals_through_standard_balance_increments() {
+        let chain_spec = pulsechain_rpls_chainspec();
+        let spec = PulseExecutorSpec {
+            chain_spec: &chain_spec,
+            paris_active: Some(true),
+            shanghai_active: Some(true),
+        };
+        let recipient = alloy_primitives::address!("0x1000000000000000000000000000000000000000");
+        let withdrawals = Withdrawals::new(vec![
+            Withdrawal {
+                index: 0,
+                validator_index: 0,
+                address: recipient,
+                amount: 2,
+            },
+            Withdrawal {
+                index: 1,
+                validator_index: 1,
+                address: recipient,
+                amount: 0,
+            },
+        ]);
+        let block_env = BlockEnv {
+            number: U256::from(PULSECHAIN_MAINNET.primordial_pulse_block - 1),
+            timestamp: U256::from(ETHEREUM_MAINNET_SHANGHAI_TIMESTAMP),
+            ..Default::default()
+        };
+
+        let increments =
+            post_block_balance_increments(spec, &block_env, &[] as &[Header], Some(&withdrawals));
+
+        assert_eq!(increments.get(&recipient), Some(&2_000_000_000u128));
+    }
+
+    #[test]
+    fn pulse_executor_spec_prevents_reward_for_zero_difficulty_header() {
+        let chain_spec = pulsechain_rpls_chainspec();
+        let spec = PulseExecutorSpec {
+            chain_spec: &chain_spec,
+            paris_active: Some(true),
+            shanghai_active: Some(true),
+        };
+        let beneficiary = alloy_primitives::address!("0x2000000000000000000000000000000000000000");
+        let block_env = BlockEnv {
+            number: U256::from(PULSECHAIN_MAINNET.primordial_pulse_block - 1),
+            beneficiary,
+            ..Default::default()
+        };
+
+        let increments = post_block_balance_increments(spec, &block_env, &[] as &[Header], None);
+
+        assert!(!increments.contains_key(&beneficiary));
+    }
+
+    #[test]
+    fn pulse_executor_spec_includes_reward_for_nonzero_difficulty_header() {
+        let chain_spec = pulsechain_rpls_chainspec();
+        let spec = PulseExecutorSpec {
+            chain_spec: &chain_spec,
+            paris_active: Some(false),
+            shanghai_active: Some(false),
+        };
+        let beneficiary = alloy_primitives::address!("0x3000000000000000000000000000000000000000");
+        let block_env = BlockEnv {
+            number: U256::from(PULSECHAIN_MAINNET.primordial_pulse_block),
+            beneficiary,
+            ..Default::default()
+        };
+
+        let increments = post_block_balance_increments(spec, &block_env, &[] as &[Header], None);
+
+        assert_eq!(
+            increments.get(&beneficiary),
+            Some(&2_000_000_000_000_000_000u128)
+        );
+    }
+
+    #[test]
     fn evm_env_uses_ethereum_chain_id_before_pulse_and_pulse_chain_id_at_fork() {
         let config = PulseEvmConfig {
             inner: EthEvmConfig::new(pulsechain_rpls_chainspec()),
@@ -1583,6 +1790,87 @@ mod tests {
             config.evm_env(&header).unwrap().cfg_env.chain_id,
             PULSECHAIN_MAINNET.chain_id
         );
+    }
+
+    #[test]
+    fn evm_env_uses_go_pulse_merge_rule_from_zero_difficulty_headers() {
+        let config = PulseEvmConfig {
+            inner: EthEvmConfig::new(pulsechain_rpls_chainspec()),
+        };
+        let randao = B256::repeat_byte(0x77);
+
+        let pow_header = Header {
+            number: 15_537_394,
+            timestamp: 1_663_224_162,
+            mix_hash: randao,
+            difficulty: U256::from(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.evm_env(&pow_header).unwrap().cfg_env.spec,
+            SpecId::LONDON
+        );
+
+        let pos_header = Header {
+            number: 15_537_394,
+            timestamp: 1_663_224_162,
+            mix_hash: randao,
+            difficulty: U256::ZERO,
+            ..Default::default()
+        };
+        let env = config.evm_env(&pos_header).unwrap();
+
+        assert_eq!(env.cfg_env.spec, SpecId::MERGE);
+        assert_eq!(env.block_env.difficulty, U256::ZERO);
+        assert_eq!(env.block_env.prevrandao, Some(randao));
+    }
+
+    #[test]
+    fn evm_env_uses_go_pulse_pow_rule_for_primordial_pulse_header() {
+        let config = PulseEvmConfig {
+            inner: EthEvmConfig::new(pulsechain_rpls_chainspec()),
+        };
+        let header = Header {
+            number: PULSECHAIN_MAINNET.primordial_pulse_block,
+            timestamp: PULSECHAIN_MAINNET.shanghai_timestamp - 12,
+            mix_hash: B256::repeat_byte(0x78),
+            difficulty: U256::from(PULSECHAIN_TTD_OFFSET),
+            ..Default::default()
+        };
+        let env = config.evm_env(&header).unwrap();
+
+        assert_eq!(env.cfg_env.spec, SpecId::LONDON);
+        assert_eq!(env.block_env.difficulty, U256::from(PULSECHAIN_TTD_OFFSET));
+        assert_eq!(env.block_env.prevrandao, None);
+    }
+
+    #[test]
+    fn next_evm_env_uses_go_pulse_merge_rule_from_parent_difficulty() {
+        let config = PulseEvmConfig {
+            inner: EthEvmConfig::new(pulsechain_rpls_chainspec()),
+        };
+        let randao = B256::repeat_byte(0x79);
+        let parent = Header {
+            number: 15_537_394,
+            timestamp: 1_663_224_162,
+            difficulty: U256::ZERO,
+            base_fee_per_gas: Some(1_000_000_000),
+            gas_limit: 30_000_000,
+            ..Default::default()
+        };
+        let attributes = NextBlockEnvAttributes {
+            timestamp: 1_663_224_174,
+            suggested_fee_recipient: Address::repeat_byte(0x11),
+            prev_randao: randao,
+            gas_limit: 30_000_000,
+            parent_beacon_block_root: None,
+            withdrawals: None,
+        };
+        let env = config.next_evm_env(&parent, &attributes).unwrap();
+
+        assert_eq!(env.cfg_env.spec, SpecId::MERGE);
+        assert_eq!(env.block_env.difficulty, U256::ZERO);
+        assert_eq!(env.block_env.prevrandao, Some(randao));
     }
 
     #[test]

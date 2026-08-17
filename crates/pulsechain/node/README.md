@@ -5,9 +5,12 @@ rpls node integration for PulseChain.
 ## Done
 
 - Provides `PulseChainSpecParser` for `pulsechain`, `pulsechain-testnet-v4`, hidden `pulsechain-devnet`, and delegated Ethereum chains.
+- Provides `PulseNode`, which reuses Ethereum node components while selecting `PulseStorage`.
 - Builds `ChainSpec` values from Pulse mainnet and testnet-v4 metadata.
 - Installs `PulseExecutorBuilder`, wrapping the upstream Ethereum EVM configuration.
 - Overrides EVM transaction chain ID to Ethereum mainnet before PrimordialPulse and PulseChain at/after PrimordialPulse.
+- Forces Shanghai EVM rules for go-pulse's pre-PrimordialPulse Shanghai gap.
+- Supplies Pulse-aware Shanghai activation to upstream finalization so it credits gap withdrawals through the normal balance-increment and state-hook path.
 - Applies PrimordialPulse state mutation exactly at the configured fork block.
 - Applies sacrifice credits, testnet-v4 treasury credit, and deposit contract replacement.
 - Installs `PulseBeaconConsensus`, wrapping the upstream beacon consensus.
@@ -19,7 +22,8 @@ rpls node integration for PulseChain.
 
 - Live peer handshake compatibility has not been proven yet.
 - Golden block/state-root/receipt-root fixtures around PrimordialPulse are not built yet.
+- Golden block fixtures for Shanghai-gap withdrawal blocks are not built yet.
 
 ## Verification
 
-- Unit tests cover chain parsing, chain spec identity, executor trigger boundaries, transaction chain ID overrides, PrimordialPulse state mutation, deposit replacement, sacrifice allocation, testnet-v4 treasury behavior, Pulse consensus boundary behavior, and POW header DAO/base-fee parity.
+- Unit tests cover chain parsing, chain spec identity, executor trigger boundaries, transaction chain ID overrides, Shanghai-gap EVM activation and withdrawal credits, PrimordialPulse state mutation, deposit replacement, sacrifice allocation, testnet-v4 treasury behavior, Pulse consensus boundary behavior, and POW header DAO/base-fee parity.

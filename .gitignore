@@ -4,3 +4,5 @@
 /*.json
 .DS_Store*
 /result*
+/vendor
+/*.txt

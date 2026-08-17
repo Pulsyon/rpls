@@ -29,6 +29,8 @@ currently implemented, including:
 - Ethereum chain ID before PrimordialPulse and PulseChain chain ID at and after
   PrimordialPulse.
 - PulseChain Shanghai activation behavior.
+- Storage reads preserve withdrawal bodies for the pre-PrimordialPulse Shanghai
+  gap between Ethereum Shanghai time and PulseChain Shanghai time.
 - PrimordialPulse difficulty and POS-to-POW-to-POS header transition rules.
 - PrimordialPulse state mutation: sacrifice credits, optional treasury credit,
   and deposit contract replacement.
@@ -54,10 +56,13 @@ infrastructure.
   PrimordialPulse difficulty and POS-to-POW transition behavior.
 - `crates/pulsechain/evm`: Embedded PulseChain EVM artifacts, sacrifice
   allocation parsing, and deposit contract replacement data.
+- `crates/pulsechain/storage`: PulseChain body storage adapter. This preserves
+  withdrawal bodies for the go-pulse Shanghai gap while reusing upstream
+  provider/storage traits.
 - `crates/pulsechain/node`: Node integration layer. This wraps upstream
   Ethereum node components with the PulseChain consensus wrapper, EVM
-  configuration, transaction chain ID override, and PrimordialPulse executor
-  mutation.
+  configuration, Pulse storage type, transaction chain ID override, and
+  PrimordialPulse executor mutation.
 - `crates/pulsechain/tests`: Cross-crate go-pulse parity tests.
 - `tools`: Nix flake and `cargo-deny` configuration.
 
@@ -214,6 +219,8 @@ remaining validation work is:
 
 - Golden block import fixtures around PrimordialPulse, including state root,
   receipt root, logs bloom, gas used, transaction sender recovery, and receipts.
+- End-to-end fixture coverage for Shanghai-gap blocks that include withdrawals
+  before the PulseChain Shanghai timestamp.
 - Live peer handshake compatibility validation against go-pulse peers.
 - Trace/debug RPC compatibility fixtures.
 - Fast trusted-checkpoint sync mode wiring. Snapshot download support is tracked
